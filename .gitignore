@@ -1,13 +1,18 @@
-# Binaries
-llmhub
-*.exe
-
-# Go
-*.test
-*.out
-vendor/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
 
 # IDE
 .idea/
 .vscode/
 *.swp
+
+# Project
+.env
+*.key
+config.enc
+.superpowers/
