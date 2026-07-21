@@ -1,0 +1,229 @@
+<h2>llmhub TUI — 主面板布局</h2>
+<p class="subtitle">左侧 Provider 列表 + 中间 Model 列表 + 右侧状态面板，底部日志</p>
+
+<style>
+  .tui-frame {
+    background: #0d1117;
+    border: 2px solid #30363d;
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    color: #c9d1d9;
+  }
+  .tui-titlebar {
+    background: #161b22;
+    padding: 8px 14px;
+    border-bottom: 1px solid #30363d;
+    font-weight: 600;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .tui-body { display: flex; height: 360px; }
+  .tui-panel {
+    padding: 10px 12px;
+    border-right: 1px solid #30363d;
+    overflow-y: auto;
+  }
+  .tui-panel:last-child { border-right: none; }
+  .tui-panel.providers { width: 180px; }
+  .tui-panel.models   { width: 220px; }
+  .tui-panel.status   { flex: 1; }
+
+  .tui-panel-header {
+    color: #8b949e;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px dashed #21262d;
+  }
+  .tui-item {
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin: 2px 0;
+  }
+  .tui-item.active {
+    background: #1f6feb;
+    color: white;
+  }
+  .tui-item.selected {
+    background: #30363d;
+  }
+  .tui-item:hover { background: #21262d; }
+  .tui-badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background: #238636;
+    color: white;
+    margin-left: 6px;
+  }
+  .tui-badge.warn { background: #9e6a03; }
+  .tui-badge.off  { background: #da3633; }
+
+  .tui-logbar {
+    border-top: 1px solid #30363d;
+    background: #0d1117;
+    height: 100px;
+    padding: 8px 14px;
+    overflow-y: auto;
+    font-size: 11px;
+    color: #8b949e;
+  }
+  .tui-log-entry { padding: 2px 0; }
+  .tui-log-entry .time { color: #484f58; }
+  .tui-log-entry .route { color: #58a6ff; }
+  .tui-log-entry .code  { color: #3fb950; }
+
+  .tui-hotkey {
+    background: #21262d;
+    color: #8b949e;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+
+  .status-section { margin-bottom: 16px; }
+  .status-value {
+    color: #58a6ff;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .status-label {
+    color: #8b949e;
+    font-size: 10px;
+  }
+</style>
+
+<div class="tui-frame">
+  <div class="tui-titlebar">
+    <span>🔮 llmhub</span>
+    <span style="color:#8b949e;font-size:11px;">
+      <span class="tui-hotkey">Tab</span> 切面板 &nbsp;
+      <span class="tui-hotkey">j</span>/<span class="tui-hotkey">k</span> 移动 &nbsp;
+      <span class="tui-hotkey">Enter</span> 激活 &nbsp;
+      <span class="tui-hotkey">Ctrl+A</span> 添加
+    </span>
+  </div>
+  <div class="tui-body">
+    <!-- Providers Panel -->
+    <div class="tui-panel providers">
+      <div class="tui-panel-header">Providers</div>
+      <div class="tui-item">
+        🟢 Anthropic
+        <span class="tui-badge">3 models</span>
+      </div>
+      <div class="tui-item">
+        🟢 OpenAI
+        <span class="tui-badge">5 models</span>
+      </div>
+      <div class="tui-item">
+        🟡 Groq
+        <span class="tui-badge">2 models</span>
+      </div>
+      <div class="tui-item">
+        🔴 DeepSeek
+        <span class="tui-badge off">down</span>
+      </div>
+      <div class="tui-item" style="color:#484f58;font-style:italic;">
+        + Add Provider
+      </div>
+    </div>
+
+    <!-- Models Panel -->
+    <div class="tui-panel models">
+      <div class="tui-panel-header">Models &nbsp;<span style="font-weight:400;font-size:10px;">(filter: all)</span></div>
+      <div class="tui-item active">
+        ▶ claude-opus-4-8
+        <span style="color:#8b949e;font-size:10px;float:right;">2 providers</span>
+      </div>
+      <div class="tui-item">
+        &nbsp;&nbsp;claude-sonnet-5
+        <span style="color:#8b949e;font-size:10px;float:right;">1 provider</span>
+      </div>
+      <div class="tui-item">
+        &nbsp;&nbsp;gpt-5
+        <span style="color:#8b949e;font-size:10px;float:right;">1 provider</span>
+      </div>
+      <div class="tui-item">
+        &nbsp;&nbsp;deepseek-v4
+        <span style="color:#8b949e;font-size:10px;float:right;">1 provider</span>
+      </div>
+      <div class="tui-item">
+        &nbsp;&nbsp;llama-4
+        <span style="color:#8b949e;font-size:10px;float:right;">2 providers</span>
+      </div>
+    </div>
+
+    <!-- Status Panel -->
+    <div class="tui-panel status">
+      <div class="tui-panel-header">Current Route</div>
+      <div class="status-section">
+        <div class="status-label">Model</div>
+        <div class="status-value">claude-opus-4-8</div>
+      </div>
+      <div class="status-section">
+        <div class="status-label">Provider</div>
+        <div style="color:#c9d1d9;">Anthropic</div>
+      </div>
+      <div class="status-section">
+        <div class="status-label">Protocol</div>
+        <div style="color:#c9d1d9;">Anthropic Messages</div>
+      </div>
+      <div class="status-section">
+        <div class="status-label">Latency</div>
+        <div style="color:#3fb950;">234ms &nbsp;<span style="font-size:10px;color:#8b949e;">(last 10)</span></div>
+      </div>
+      <div class="status-section">
+        <div class="status-label">Fallback Chain</div>
+        <div style="color:#c9d1d9;">
+          Anthropic → <span style="color:#484f58;">OpenAI → Groq</span>
+        </div>
+      </div>
+
+      <div class="tui-panel-header" style="margin-top:14px;">Quick Actions</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <div style="background:#21262d;padding:6px 10px;border-radius:4px;font-size:11px;">
+          <span class="tui-hotkey">Ctrl+A</span> Add Provider
+        </div>
+        <div style="background:#21262d;padding:6px 10px;border-radius:4px;font-size:11px;">
+          <span class="tui-hotkey">Ctrl+S</span> Save Config
+        </div>
+        <div style="background:#21262d;padding:6px 10px;border-radius:4px;font-size:11px;">
+          <span class="tui-hotkey">Ctrl+L</span> Toggle Logs
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log Bar -->
+  <div class="tui-logbar">
+    <div class="tui-log-entry">
+      <span class="time">14:32:01</span>
+      <span class="route"> claude-opus-4-8 → Anthropic</span>
+      <span class="code"> 200</span> 2.1s &nbsp;| 1.2k tokens
+    </div>
+    <div class="tui-log-entry">
+      <span class="time">14:31:55</span>
+      <span class="route"> claude-opus-4-8 → Anthropic</span>
+      <span class="code"> 200</span> 0.8s &nbsp;| 0.9k tokens
+    </div>
+    <div class="tui-log-entry">
+      <span class="time">14:31:40</span>
+      <span class="route"> gpt-5 → OpenAI</span>
+      <span style="color:#da3633;"> 429</span> rate limit →
+      <span class="route"> fallback → Groq</span>
+      <span class="code"> 200</span> 1.4s
+    </div>
+    <div class="tui-log-entry">
+      <span class="time">14:30:02</span>
+      <span class="route"> deepseek-v4 → DeepSeek</span>
+      <span style="color:#da3633;"> timeout</span> →
+      <span class="route"> fallback → OpenAI</span>
+      <span class="code"> 200</span> 3.2s
+    </div>
+  </div>
+</div>

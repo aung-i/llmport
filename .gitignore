@@ -1,0 +1,13 @@
+# Binaries
+llmhub
+*.exe
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
