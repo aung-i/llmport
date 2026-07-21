@@ -1,9 +1,6 @@
 """Gateway HTTP server with OpenAI and Anthropic protocol endpoints."""
 
-import json
 import time
-import asyncio
-from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -99,18 +96,30 @@ async def openai_chat(request: Request) -> Response:
 
     if is_stream:
         async def generate():
-            async for chunk in openai_handler.stream(body, provider, model_name):
+            primary = openai_handler.stream(body, provider, model_name)
+            try:
+                first_chunk = await primary.__anext__()
+            except StopAsyncIteration:
+                return
+
+            if b"[ERROR]" in first_chunk:
+                await primary.aclose()
+                fallback = router.try_fallback(provider.id)
+                if fallback:
+                    fb_provider, fb_model = fallback
+                    if fb_provider.protocol == "openai":
+                        async for fb_chunk in openai_handler.stream(
+                            body, fb_provider, fb_model
+                        ):
+                            yield fb_chunk
+                        return
+                yield first_chunk
+                return
+
+            yield first_chunk
+            async for chunk in primary:
                 yield chunk
-                # If chunk contains an error marker, try fallback
-                if b"[ERROR]" in chunk:
-                    fallback = router.try_fallback(provider.id)
-                    if fallback:
-                        fb_provider, fb_model = fallback
-                        if fb_provider.protocol == "openai":
-                            async for fb_chunk in openai_handler.stream(
-                                body, fb_provider, fb_model
-                            ):
-                                yield fb_chunk
+
         return StreamingResponse(generate(), media_type="text/event-stream")
     else:
         result, error = await openai_handler.forward(body, provider, model_name)
@@ -186,17 +195,30 @@ async def anthropic_messages(request: Request) -> Response:
 
     if is_stream:
         async def generate():
-            async for chunk in anthropic_handler.stream(body, provider, model_name):
+            primary = anthropic_handler.stream(body, provider, model_name)
+            try:
+                first_chunk = await primary.__anext__()
+            except StopAsyncIteration:
+                return
+
+            if b"[ERROR]" in first_chunk:
+                await primary.aclose()
+                fallback = router.try_fallback(provider.id)
+                if fallback:
+                    fb_provider, fb_model = fallback
+                    if fb_provider.protocol == "anthropic":
+                        async for fb_chunk in anthropic_handler.stream(
+                            body, fb_provider, fb_model
+                        ):
+                            yield fb_chunk
+                        return
+                yield first_chunk
+                return
+
+            yield first_chunk
+            async for chunk in primary:
                 yield chunk
-                if b"[ERROR]" in chunk:
-                    fallback = router.try_fallback(provider.id)
-                    if fallback:
-                        fb_provider, fb_model = fallback
-                        if fb_provider.protocol == "anthropic":
-                            async for fb_chunk in anthropic_handler.stream(
-                                body, fb_provider, fb_model
-                            ):
-                                yield fb_chunk
+
         return StreamingResponse(generate(), media_type="text/event-stream")
     else:
         result, error = await anthropic_handler.forward(body, provider, model_name)
@@ -327,3 +349,45 @@ def create_app(store: ConfigStore) -> Starlette:
     ]
 
     return Starlette(routes=routes)
+
+
+def run_daemon(store: ConfigStore) -> None:
+    """Start the gateway daemon bound to the control port, OpenAI port (11434),
+    and Anthropic port (11435), all serving the same app.
+
+    The control API is reachable on all three ports.  The control port from
+    *LLMGATE_CONTROL_PORT* is the port the TUI uses for management requests.
+    """
+    import os
+    import threading
+    import uvicorn
+
+    app = create_app(store)
+    control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
+
+    ports = [11434, 11435]
+    if control_port:
+        ports.append(control_port)
+
+    def _serve(port: int) -> None:
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+        )
+        uvicorn.Server(config).run()
+
+    # Start protocol ports in daemon threads
+    threads = []
+    for port in [11434, 11435]:
+        t = threading.Thread(target=_serve, args=(port,), daemon=True)
+        t.start()
+        threads.append(t)
+
+    # Control port runs in the main thread (handles signals for graceful stop)
+    if control_port:
+        _serve(control_port)
+    else:
+        # If no control port, block on one of the protocol ports
+        threads[0].join()

@@ -3,7 +3,6 @@
 import os
 import time
 import json
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -107,14 +106,31 @@ class DaemonManager:
         time.sleep(0.5)
 
     def stop(self) -> None:
-        """Stop the daemon via control API."""
+        """Stop the daemon via control API and wait for process exit before
+        cleaning up the PID file."""
         port = self.get_control_port()
+        pid = None
         if port:
             try:
                 with httpx.Client(timeout=5.0) as client:
                     client.post(f"http://127.0.0.1:{port}/api/daemon/stop")
             except Exception:
                 pass
+        # Read PID before unlinking, so we can verify the process stopped
+        if self.pid_path.exists():
+            try:
+                data = json.loads(self.pid_path.read_text())
+                pid = data.get("pid")
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+        if pid:
+            # Poll for process termination (up to ~5 s)
+            for _ in range(10):
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.5)
+                except OSError:
+                    break
         if self.pid_path.exists():
             self.pid_path.unlink()
 
@@ -127,22 +143,10 @@ class DaemonManager:
 
 def run_daemon() -> None:
     """Entry point for daemon mode. Called when llmgate is run with --daemon."""
-    import uvicorn
     from llmgate.config.store import ConfigStore
-    from llmgate.gateway.server import create_app
+    from llmgate.gateway.server import run_daemon as _server_run_daemon
 
-    control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
     store = ConfigStore()
     if not store.key_path.exists():
         store.init_first_run()
-
-    app = create_app(store)
-
-    config = uvicorn.Config(
-        app,
-        host="127.0.0.1",
-        port=control_port,
-        log_level="warning",
-    )
-    server = uvicorn.Server(config)
-    server.run()
+    _server_run_daemon(store)
