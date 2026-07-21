@@ -1,0 +1,52 @@
+"""Encrypted YAML config store for ~/.config/llmgate/."""
+
+import os
+import tempfile
+from pathlib import Path
+
+import yaml
+
+from llmgate.config.crypto import generate_key, encrypt, decrypt
+
+
+class ConfigStore:
+    def __init__(self, config_dir: str | None = None):
+        if config_dir:
+            self.dir = Path(config_dir)
+        else:
+            xdg = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+            self.dir = Path(xdg) / "llmgate"
+        self.key_path = self.dir / "key"
+        self.config_path = self.dir / "config.enc"
+
+    def init_first_run(self) -> None:
+        """Create config directory, generate key, write empty config."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        if not self.key_path.exists():
+            key = generate_key()
+            self.key_path.write_bytes(key)
+        default = {
+            "version": 1,
+            "gateway": {"openai_port": 11434, "anthropic_port": 11435},
+            "providers": [],
+            "active_model": None,
+        }
+        self.save(default)
+
+    def _read_key(self) -> bytes:
+        return self.key_path.read_bytes()
+
+    def load(self) -> dict:
+        """Load and decrypt the config file."""
+        key = self._read_key()
+        ciphertext = self.config_path.read_bytes()
+        plaintext = decrypt(key, ciphertext)
+        return yaml.safe_load(plaintext)
+
+    def save(self, data: dict) -> None:
+        """Encrypt and write the config file."""
+        key = self._read_key()
+        plaintext = yaml.dump(data, default_flow_style=False, allow_unicode=True)
+        ciphertext = encrypt(key, plaintext)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_bytes(ciphertext)
