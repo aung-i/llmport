@@ -419,7 +419,7 @@ Client receives response
 |---|---|---|
 | 23 | Routing | Load balancing: round-robin, lowest-latency |
 | 24 | Routing | Cost-aware, context-length-aware, task-type routing |
-| 25 | Statistics | Usage stats per model/provider (requests, tokens, cost estimates) |
+| 25 | Statistics | Usage stats per model/provider (requests, tokens, cost estimates, tokens/s 吞吐, TTFT 首 token 延迟) |
 | 26 | Settings | Change gateway ports |
 | 27 | Settings | Config export/import |
 | 28 | Gateway | Rate limiting |
