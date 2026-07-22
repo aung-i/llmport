@@ -2,7 +2,7 @@
 name = "llmgate"
 version = "0.1.0"
 description = "Terminal LLM API Gateway"
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "textual>=1.0.0",
     "httpx>=0.28.0",
