@@ -14,7 +14,8 @@ def test_init_first_run_creates_key_and_config():
         assert Path(tmp, "config.enc").exists()
         data = store.load()
         assert data["version"] == 1
-        assert data["gateway"]["openai_port"] == 11434
+        assert data["gateway"]["host"] == "127.0.0.1"
+        assert data["gateway"]["port"] == 11434
 
 
 def test_save_and_load_preserves_data():

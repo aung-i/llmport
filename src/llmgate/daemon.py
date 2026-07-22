@@ -143,10 +143,32 @@ class DaemonManager:
 
 def run_daemon() -> None:
     """Entry point for daemon mode. Called when llmgate is run with --daemon."""
+    import os
+    import time
+    import json
+
     from llmgate.config.store import ConfigStore
     from llmgate.gateway.server import run_daemon as _server_run_daemon
 
     store = ConfigStore()
     if not store.key_path.exists():
         store.init_first_run()
+
+    # Write PID file so status/stop CLI commands work
+    control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
+    config_dir = os.environ.get(
+        "XDG_CONFIG_HOME",
+        os.path.join(os.path.expanduser("~"), ".config"),
+    )
+    pid_dir = os.path.join(config_dir, "llmgate")
+    os.makedirs(pid_dir, exist_ok=True)
+    pid_path = os.path.join(pid_dir, "daemon.pid")
+    pid_path_write = pid_path  # alias for clarity in json.dumps below
+    with open(pid_path, "w") as f:
+        json.dump({
+            "pid": os.getpid(),
+            "control_port": control_port,
+            "started_at": time.time(),
+        }, f)
+
     _server_run_daemon(store)

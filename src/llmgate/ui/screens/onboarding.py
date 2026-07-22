@@ -1,8 +1,6 @@
 """First-run onboarding wizard."""
 
 import httpx
-from pathlib import Path
-import os
 
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
@@ -30,11 +28,12 @@ class OnboardingScreen(ModalScreen):
     CSS = """
     OnboardingScreen {
         align: center middle;
+        background: rgba(15, 17, 25, 0.85);
     }
     #onboard-container {
-        width: 50;
-        height: 20;
-        border: thick $success;
+        width: 48;
+        height: auto;
+        border: double $primary;
         background: $surface;
         padding: 2 3;
     }
@@ -42,15 +41,15 @@ class OnboardingScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Container(id="onboard-container"):
-            yield Static("🎉 欢迎使用 llmgate!")
+            yield Static("[bold $primary]llmgate[/] — Terminal LLM API Gateway", id="onboard-title")
             yield Static("")
             yield Static("检测到你是第一次使用。")
-            yield Static("我们将为你:")
-            yield Static("  1. 创建加密密钥")
-            yield Static("  2. 引导添加第一个供应商")
-            yield Static("  3. 启动网关")
             yield Static("")
-            yield Button("开始设置", id="btn-start-setup", variant="primary")
+            yield Static("[dim]  1. 创建加密密钥 — 本地安全存储 API Key[/]")
+            yield Static("[dim]  2. 添加供应商 — 支持 OpenAI / Anthropic[/]")
+            yield Static("[dim]  3. 配置模型别名 — 多供应商路由和自动 fallback[/]")
+            yield Static("")
+            yield Button(" 开始设置", id="btn-start-setup", variant="primary")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-start-setup":

@@ -27,7 +27,7 @@ class ConfigStore:
             self.key_path.write_bytes(key)
         default = {
             "version": 1,
-            "gateway": {"openai_port": 11434, "anthropic_port": 11435},
+            "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [],
             "active_model": None,
         }

@@ -40,7 +40,7 @@ def test_full_flow():
         assert resp.status_code == 200
 
         # Models endpoint returns model list
-        resp = client.get("/v1/models")
+        resp = client.get("/openai/v1/models")
         assert resp.status_code == 200
         models = resp.json()
         assert len(models["data"]) >= 1
@@ -96,9 +96,41 @@ def test_protocol_mismatch_error():
         app = create_app(store)
         client = TestClient(app)
 
-        resp = client.post("/v1/chat/completions", json={
+        resp = client.post("/openai/v1/chat/completions", json={
             "model": "claude",
             "messages": [{"role": "user", "content": "hi"}],
         })
         assert resp.status_code == 400
         assert "Anthropic" in resp.json()["error"]
+
+
+def test_gateway_config():
+    """Test gateway config GET and POST via control API."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        app = create_app(store)
+        client = TestClient(app)
+
+        # GET default config
+        resp = client.get("/api/gateway/config")
+        assert resp.status_code == 200
+        cfg = resp.json()
+        assert cfg["host"] == "127.0.0.1"
+        assert cfg["port"] == 11434
+
+        # POST update config
+        resp = client.post("/api/gateway/config", json={
+            "host": "0.0.0.0",
+            "port": 9999,
+        })
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["gateway"]["host"] == "0.0.0.0"
+        assert resp.json()["gateway"]["port"] == 9999
+
+        # GET confirm persistence
+        resp = client.get("/api/gateway/config")
+        assert resp.status_code == 200
+        assert resp.json()["host"] == "0.0.0.0"
+        assert resp.json()["port"] == 9999

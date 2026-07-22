@@ -30,6 +30,7 @@ class GatewayState:
     def reload(self) -> None:
         """Reload config from disk."""
         data = self.store.load()
+        self.gateway = data.get("gateway", {"host": "127.0.0.1", "port": 11434})
         self.providers = [
             ProviderConfig.from_dict(p) for p in data.get("providers", [])
         ]
@@ -42,7 +43,7 @@ class GatewayState:
         """Persist current state to disk."""
         data = {
             "version": 1,
-            "gateway": {"openai_port": 11434, "anthropic_port": 11435},
+            "gateway": self.gateway,
             "providers": [p.to_dict() for p in self.providers],
             "models": [
                 {
@@ -319,6 +320,21 @@ async def control_fetch_models(request: Request) -> JSONResponse:
     return JSONResponse({"models": models, "error": error})
 
 
+async def control_gateway_config(request: Request) -> JSONResponse:
+    """Get or update gateway configuration."""
+    state = _get_state()
+    if request.method == "GET":
+        return JSONResponse(state.gateway)
+    elif request.method == "POST":
+        body = await request.json()
+        state.gateway = {
+            "host": body.get("host", "127.0.0.1"),
+            "port": body.get("port", 11434),
+        }
+        state.save()
+        return JSONResponse({"ok": True, "gateway": state.gateway})
+
+
 async def control_daemon_stop(request: Request) -> JSONResponse:
     """Initiate graceful shutdown."""
     import os
@@ -334,17 +350,18 @@ def create_app(store: ConfigStore) -> Starlette:
 
     routes = [
         # OpenAI protocol
-        Route("/v1/chat/completions", openai_chat, methods=["POST"]),
-        Route("/v1/models", openai_models, methods=["GET"]),
-        Route("/v1/{path:path}", openai_catchall, methods=["POST", "GET"]),
+        Route("/openai/v1/chat/completions", openai_chat, methods=["POST"]),
+        Route("/openai/v1/models", openai_models, methods=["GET"]),
+        Route("/openai/v1/{path:path}", openai_catchall, methods=["POST", "GET"]),
         # Anthropic protocol
-        Route("/v1/messages", anthropic_messages, methods=["POST"]),
+        Route("/anthropic/v1/messages", anthropic_messages, methods=["POST"]),
         # Control API
         Route("/api/status", control_status, methods=["GET"]),
         Route("/api/models/switch", control_switch_model, methods=["POST"]),
         Route("/api/providers", control_providers, methods=["GET", "POST"]),
         Route("/api/providers/test", control_test_provider, methods=["POST"]),
         Route("/api/providers/models", control_fetch_models, methods=["POST"]),
+        Route("/api/gateway/config", control_gateway_config, methods=["GET", "POST"]),
         Route("/api/daemon/stop", control_daemon_stop, methods=["POST"]),
     ]
 
@@ -352,11 +369,11 @@ def create_app(store: ConfigStore) -> Starlette:
 
 
 def run_daemon(store: ConfigStore) -> None:
-    """Start the gateway daemon bound to the control port, OpenAI port (11434),
-    and Anthropic port (11435), all serving the same app.
+    """Start the gateway daemon on the configured host:port (default 127.0.0.1:11434)
+    and the control port from LLMGATE_CONTROL_PORT.
 
-    The control API is reachable on all three ports.  The control port from
-    *LLMGATE_CONTROL_PORT* is the port the TUI uses for management requests.
+    All protocols (OpenAI, Anthropic) share the same port; they are
+    differentiated by URL path (/v1/chat/completions vs /v1/messages).
     """
     import os
     import threading
@@ -365,22 +382,28 @@ def run_daemon(store: ConfigStore) -> None:
     app = create_app(store)
     control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
 
-    ports = [11434, 11435]
+    cfg = store.load().get("gateway", {})
+    host = cfg.get("host", "127.0.0.1")
+    gateway_port = cfg.get("port", 11434)
+
+    ports = [gateway_port]
     if control_port:
         ports.append(control_port)
 
     def _serve(port: int) -> None:
         config = uvicorn.Config(
             app,
-            host="127.0.0.1",
+            host=host,
             port=port,
             log_level="warning",
         )
         uvicorn.Server(config).run()
 
-    # Start protocol ports in daemon threads
+    # Start gateway port in a daemon thread
     threads = []
-    for port in [11434, 11435]:
+    for port in ports:
+        if port == control_port:
+            continue  # control port runs in main thread
         t = threading.Thread(target=_serve, args=(port,), daemon=True)
         t.start()
         threads.append(t)
@@ -388,6 +411,6 @@ def run_daemon(store: ConfigStore) -> None:
     # Control port runs in the main thread (handles signals for graceful stop)
     if control_port:
         _serve(control_port)
-    else:
-        # If no control port, block on one of the protocol ports
+    elif threads:
+        # If no control port, block on the gateway thread
         threads[0].join()

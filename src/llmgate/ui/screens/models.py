@@ -7,6 +7,7 @@ from textual.screen import ModalScreen
 
 from llmgate.daemon import DaemonManager
 from llmgate.ui.screens.onboarding import async_get_json
+from llmgate.ui.widgets import Section
 
 
 class ModelDetailScreen(ModalScreen):
@@ -17,11 +18,15 @@ class ModelDetailScreen(ModalScreen):
         align: center middle;
     }
     #detail-container {
-        width: 60;
-        height: 20;
+        width: 56;
+        height: auto;
+        min-height: 18;
         border: thick $primary;
         background: $surface;
-        padding: 1;
+        padding: 2 3;
+    }
+    #detail-container Label {
+        padding: 0;
     }
     """
 
@@ -32,18 +37,34 @@ class ModelDetailScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Container(id="detail-container"):
-            yield Label(f"模型: {self.model['id']}")
-            yield Label(f"供应商数: {len(self.model.get('bindings', []))}")
+            yield Label(f"模型: [bold $primary]{self.model['id']}[/]", id="detail-title")
             yield Label("")
-            yield Label("供应商绑定 (优先级排序):")
+            yield Label(f"[dim]供应商数: {len(self.model.get('bindings', []))}[/]")
+            yield Label("")
+            yield Label("[bold $secondary-lighten-1]供应商绑定[/] (优先级排序):")
             for b in self.model.get("bindings", []):
-                yield Label(f"  {b['priority']}. {b['provider_id']} → {b['model_name']}")
+                yield Label(f"  {b['priority']}. [bold]{b['provider_id']}[/] → {b['model_name']}")
             yield Label("")
-            yield Label("路由策略: priority_fallback")
+            yield Label("[dim]路由策略: priority_fallback[/]")
             yield Label("")
             with Horizontal():
-                yield Button("设为当前", id="set-active", variant="primary")
-                yield Button("关闭", id="close")
+                yield Button(" 设为当前", id="set-active", variant="primary")
+                yield Button(" 关闭", id="close")
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "close":
+            self.dismiss()
+        elif event.button.id == "set-active":
+            port = self.daemon.get_control_port()
+            if port:
+                import httpx
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(
+                        f"http://127.0.0.1:{port}/api/models/switch",
+                        json={"model_id": self.model["id"]},
+                    )
+                self.notify(f"已切换到: {self.model['id']}", title="模型切换")
+                self.dismiss()
 
 
 class ModelsPane(Vertical):
@@ -55,13 +76,12 @@ class ModelsPane(Vertical):
         self.active_model: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("当前: 加载中...", id="active-info")
-        yield Static("─" * 40, id="separator")
-        yield Static("模型列表", id="model-list-title")
-        yield ListView(id="model-list")
-        with Horizontal():
-            yield Button("模型详情", id="btn-detail", variant="default")
-            yield Button("添加模型", id="btn-add", variant="default")
+        yield Static("[dim]加载中...[/]", id="active-info")
+        with Section("模型列表"):
+            yield ListView(id="model-list")
+        with Horizontal(id="model-actions"):
+            yield Button(" 模型详情", id="btn-detail", variant="default")
+            yield Button(" 添加模型", id="btn-add", variant="primary")
 
     async def on_mount(self) -> None:
         await self.refresh_models()
@@ -76,7 +96,6 @@ class ModelsPane(Vertical):
         self.active_model = data.get("active_model")
 
         providers_data = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
-        # Build model list from provider data
         alias_map: dict[str, set[str]] = {}
         for p in providers_data:
             for m in p.get("models", []):
@@ -91,33 +110,51 @@ class ModelsPane(Vertical):
             for alias, providers in alias_map.items()
         ]
 
-        # Update UI
         list_view = self.query_one("#model-list", ListView)
         await list_view.clear()
-        for m in self.models:
-            prefix = "▶ " if m["id"] == self.active_model else "  "
-            text = f"{prefix}{m['id']}   ({m['provider_count']} 供应商)"
-            list_view.append(ListItem(Label(text)))
+        if not self.models:
+            list_view.append(ListItem(Label("[dim]暂无模型 — 请先在供应商页添加 Provider[/]")))
+        else:
+            for m in self.models:
+                if m["id"] == self.active_model:
+                    text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"
+                else:
+                    text = f"  {m['id']}   [dim]({m['provider_count']} 供应商)[/]"
+                list_view.append(ListItem(Label(text)))
 
-        active_display = self.active_model or "无"
-        self.query_one("#active-info", Static).update(f"当前: {active_display}")
+        active_display = self.active_model or "[dim]无[/]"
+        self.query_one("#active-info", Static).update(f"当前活跃: [bold $primary]{active_display}[/]")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-detail":
             list_view = self.query_one("#model-list", ListView)
             if list_view.index is not None and list_view.index < len(self.models):
                 model = self.models[list_view.index]
+                daemon = self.app.daemon  # type: ignore
+                # Fetch full model data via status endpoint to get bindings
+                port = daemon.get_control_port()
+                bindings = []
+                if port:
+                    providers_data = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
+                    for p in providers_data:
+                        for m in p.get("models", []):
+                            aliases = m.get("aliases", []) or [m["name"]]
+                            if model["id"] in aliases:
+                                bindings.append({
+                                    "provider_id": p["id"],
+                                    "model_name": m["name"],
+                                    "priority": 1,
+                                })
+                model_with_bindings = {**model, "bindings": bindings}
                 await self.app.push_screen(  # type: ignore
-                    ModelDetailScreen(model, self.app.daemon)  # type: ignore
+                    ModelDetailScreen(model_with_bindings, self.app.daemon)  # type: ignore
                 )
         elif event.button.id == "btn-add":
-            self.notify("添加模型 — 在供应商页添加模型别名即可自动关联", title="提示")
+            self.notify("在供应商页添加模型别名即可自动关联", title="提示")
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Switch active model when user presses Enter."""
         if event.item is None:
             return
-        # Find the index
         list_view = self.query_one("#model-list", ListView)
         if list_view.index is not None and list_view.index < len(self.models):
             model_id = self.models[list_view.index]["id"]

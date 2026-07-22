@@ -8,6 +8,7 @@ import httpx
 
 from llmgate.daemon import DaemonManager
 from llmgate.ui.screens.onboarding import async_get_json
+from llmgate.ui.widgets import Section
 
 
 class ProviderFormScreen(ModalScreen):
@@ -18,8 +19,9 @@ class ProviderFormScreen(ModalScreen):
         align: center middle;
     }
     #form-container {
-        width: 70;
-        height: 30;
+        width: 64;
+        height: auto;
+        min-height: 28;
         border: thick $primary;
         background: $surface;
         padding: 1 2;
@@ -42,35 +44,36 @@ class ProviderFormScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Container(id="form-container"):
-            yield Label("编辑供应商" if self.is_edit else "添加供应商")
+            title = f"编辑供应商: {self.provider['name']}" if self.is_edit else "添加供应商"
+            yield Static(f"[bold $primary]{title}[/]")
             yield Label("")
-            yield Label("名称")
+            yield Label("[dim]名称[/]")
             yield Input(
                 value=self.provider.get("name", "") if self.provider else "",
                 placeholder="Anthropic",
                 id="input-name",
             )
-            yield Label("API Key")
+            yield Label("[dim]API Key[/]")
             yield Input(
                 value=self.provider.get("api_key", "") if self.provider else "",
                 placeholder="sk-ant-api03-...",
                 password=True,
                 id="input-key",
             )
-            yield Label("地址")
+            yield Label("[dim]地址[/]")
             yield Input(
                 value=self.provider.get("base_url", "") if self.provider else "",
                 placeholder="https://api.anthropic.com",
                 id="input-url",
             )
-            yield Label("协议")
-            current_protocol = self.provider.get("protocol", "openai") if self.provider else "openai"
+            yield Label("[dim]协议[/]")
+            current = self.provider.get("protocol", "openai") if self.provider else "openai"
             yield Select(
                 [(p, p.title()) for p in ["openai", "anthropic"]],
-                value=current_protocol,
+                value=current,
                 id="select-protocol",
             )
-            yield Label("模型 (每行一个: 模型名,别名1,别名2)")
+            yield Label("[dim]模型 (每行: 模型名,别名1,别名2)[/]")
             model_text = ""
             if self.provider:
                 lines = []
@@ -85,10 +88,10 @@ class ProviderFormScreen(ModalScreen):
             )
             yield Label("")
             with Horizontal():
-                yield Button("测试连接", id="btn-test", variant="default")
-                yield Button("拉取模型列表", id="btn-fetch", variant="default")
-                yield Button("保存", id="btn-save", variant="primary")
-                yield Button("取消", id="btn-cancel")
+                yield Button(" 测试连接", id="btn-test", variant="default")
+                yield Button(" 拉取模型", id="btn-fetch", variant="default")
+                yield Button(" 保存", id="btn-save", variant="primary")
+                yield Button(" 取消", id="btn-cancel")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-cancel":
@@ -170,7 +173,6 @@ class ProviderFormScreen(ModalScreen):
                     )
                 self.notify(f"已保存: {name}", title="供应商")
                 self.dismiss()
-                # Refresh parent
                 await self.app.query_one(ProvidersPane).refresh_providers()  # type: ignore
 
 
@@ -190,10 +192,10 @@ class ProvidersPane(Vertical):
     """Provider management panel."""
 
     def compose(self) -> ComposeResult:
-        yield Static("供应商列表", id="providers-title")
-        yield ListView(id="provider-list")
-        with Horizontal():
-            yield Button("添加供应商", id="btn-add-provider", variant="primary")
+        with Section("供应商列表"):
+            yield ListView(id="provider-list")
+        with Horizontal(id="provider-actions"):
+            yield Button(" 添加供应商", id="btn-add-provider", variant="primary")
 
     async def on_mount(self) -> None:
         await self.refresh_providers()
@@ -206,13 +208,16 @@ class ProvidersPane(Vertical):
         providers = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
         list_view = self.query_one("#provider-list", ListView)
         await list_view.clear()
-        for p in providers:
-            status_icon = {"up": "🟢", "degraded": "🟡", "down": "🔴"}.get(
-                p.get("health", {}).get("status", "unknown"), "⚪"
-            )
-            model_count = len(p.get("models", []))
-            text = f"{status_icon} {p['name']} · {p.get('base_url', '')} · {model_count} 模型"
-            list_view.append(ListItem(Label(text)))
+        if not providers:
+            list_view.append(ListItem(Label("[dim]暂无供应商 — 点击下方按钮添加[/]")))
+        else:
+            for p in providers:
+                icon = {"up": "🟢", "degraded": "🟡", "down": "🔴"}.get(
+                    p.get("health", {}).get("status", "unknown"), "⚪"
+                )
+                model_count = len(p.get("models", []))
+                text = f"{icon} [bold]{p['name']}[/] · [dim]{p.get('base_url', '')}[/] · {model_count} 模型"
+                list_view.append(ListItem(Label(text)))
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-add-provider":
