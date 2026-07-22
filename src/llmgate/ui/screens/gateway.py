@@ -2,7 +2,7 @@
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
-from textual.widgets import Static, Button, Input, Label
+from textual.widgets import Static, Button, Input, Label, Select
 from textual.screen import ModalScreen
 
 from llmgate.ui.widgets import Card, Section
@@ -39,10 +39,10 @@ class GatewayConfigScreen(ModalScreen):
             yield Static("[dim]修改后自动重启[/]")
             yield Label("")
             yield Label("[dim]Host[/]")
-            yield Input(
+            yield Select(
+                [("127.0.0.1", "127.0.0.1"), ("localhost", "localhost"), ("::1", "::1")],
                 value=str(self.config.get("host", "127.0.0.1")),
-                placeholder="127.0.0.1",
-                id="input-host",
+                id="select-host",
             )
             yield Label("[dim]Port[/]")
             yield Input(
@@ -65,7 +65,7 @@ class GatewayConfigScreen(ModalScreen):
             daemon = self.app.daemon  # type: ignore
             port = daemon.get_control_port()
             if port:
-                new_host = self.query_one("#input-host", Input).value.strip()
+                new_host = self.query_one("#select-host", Select).value
                 new_port = int(self.query_one("#input-port", Input).value.strip())
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     await client.post(
