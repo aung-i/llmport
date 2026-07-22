@@ -121,16 +121,32 @@ def test_gateway_config():
 
         # POST update config
         resp = client.post("/api/gateway/config", json={
-            "host": "0.0.0.0",
+            "host": "localhost",
             "port": 9999,
         })
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        assert resp.json()["gateway"]["host"] == "0.0.0.0"
+        assert resp.json()["gateway"]["host"] == "localhost"
         assert resp.json()["gateway"]["port"] == 9999
 
         # GET confirm persistence
         resp = client.get("/api/gateway/config")
         assert resp.status_code == 200
-        assert resp.json()["host"] == "0.0.0.0"
+        assert resp.json()["host"] == "localhost"
         assert resp.json()["port"] == 9999
+
+        # POST with dangerous host is rejected
+        resp = client.post("/api/gateway/config", json={
+            "host": "0.0.0.0",
+            "port": 11434,
+        })
+        assert resp.status_code == 400
+        assert "不允许的主机地址" in resp.json()["error"]
+
+        # POST with invalid port is rejected
+        resp = client.post("/api/gateway/config", json={
+            "host": "127.0.0.1",
+            "port": 80,
+        })
+        assert resp.status_code == 400
+        assert "端口号超出范围" in resp.json()["error"]

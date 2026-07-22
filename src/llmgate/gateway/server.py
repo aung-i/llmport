@@ -320,6 +320,9 @@ async def control_fetch_models(request: Request) -> JSONResponse:
     return JSONResponse({"models": models, "error": error})
 
 
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
 async def control_gateway_config(request: Request) -> JSONResponse:
     """Get or update gateway configuration."""
     state = _get_state()
@@ -327,10 +330,23 @@ async def control_gateway_config(request: Request) -> JSONResponse:
         return JSONResponse(state.gateway)
     elif request.method == "POST":
         body = await request.json()
-        state.gateway = {
-            "host": body.get("host", "127.0.0.1"),
-            "port": body.get("port", 11434),
-        }
+        host = body.get("host", "127.0.0.1").strip()
+        port = int(body.get("port", 11434))
+
+        # Reject dangerous bind addresses — the gateway should only listen locally
+        if host not in ALLOWED_HOSTS:
+            return JSONResponse(
+                {"ok": False, "error": f"不允许的主机地址: {host}。仅允许: {', '.join(sorted(ALLOWED_HOSTS))}"},
+                status_code=400,
+            )
+
+        if not (1024 <= port <= 65535):
+            return JSONResponse(
+                {"ok": False, "error": f"端口号超出范围: {port} (1024-65535)"},
+                status_code=400,
+            )
+
+        state.gateway = {"host": host, "port": port}
         state.save()
         return JSONResponse({"ok": True, "gateway": state.gateway})
 
