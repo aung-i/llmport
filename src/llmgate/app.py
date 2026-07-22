@@ -3,6 +3,12 @@
 import os
 from pathlib import Path
 
+try:
+    import importlib.metadata as _metadata
+    __version__ = _metadata.version("llmgate")
+except Exception:
+    __version__ = "unknown"
+
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static, Footer, TabbedContent, TabPane
@@ -230,7 +236,7 @@ class LlmGateApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="app-header"):
             yield Static("llmgate", classes="")
-            yield Static("v0.1.0", classes="version")
+            yield Static(f"v{__version__}", classes="version")
         with TabbedContent():
             with TabPane("⚙ 网关", id="gateway"):
                 yield GatewayPane()

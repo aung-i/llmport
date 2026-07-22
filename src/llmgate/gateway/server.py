@@ -14,6 +14,19 @@ from llmgate.gateway.router import Router, RouterError
 from llmgate.gateway import openai_handler, anthropic_handler
 
 
+def _migrate_gateway_config(data: dict) -> dict:
+    """Migrate old-format gateway config (openai_port/anthropic_port) to new format (host/port).
+
+    Modifies *data* in place when migration is needed so callers can persist
+    the result.  Returns the canonical ``{"host": str, "port": int}`` dict.
+    """
+    gw = data.get("gateway", {})
+    if "host" not in gw:
+        gw = {"host": "127.0.0.1", "port": gw.get("openai_port", 11434)}
+        data["gateway"] = gw
+    return {"host": gw["host"], "port": gw.get("port", 11434)}
+
+
 class GatewayState:
     """Mutable state shared between the server and control API."""
 
@@ -30,7 +43,10 @@ class GatewayState:
     def reload(self) -> None:
         """Reload config from disk."""
         data = self.store.load()
-        self.gateway = data.get("gateway", {"host": "127.0.0.1", "port": 11434})
+        had_host = "host" in data.get("gateway", {})
+        self.gateway = _migrate_gateway_config(data)
+        if not had_host:
+            self.store.save(data)
         self.providers = [
             ProviderConfig.from_dict(p) for p in data.get("providers", [])
         ]
@@ -287,6 +303,21 @@ async def control_providers(request: Request) -> JSONResponse:
         )
         state.save()
         return JSONResponse({"ok": True})
+    elif request.method == "DELETE":
+        body = await request.json()
+        provider_id = body.get("id")
+        if not provider_id:
+            return JSONResponse({"ok": False, "error": "Missing provider id"}, status_code=400)
+        state.providers = [p for p in state.providers if p.id != provider_id]
+        state.models = merge_aliases_into_logical_models(
+            state.providers,
+            [{"id": m.id, "bindings": [
+                {"provider_id": b.provider_id, "model_name": b.model_name, "priority": b.priority}
+                for b in m.bindings
+            ]} for m in state.models],
+        )
+        state.save()
+        return JSONResponse({"ok": True})
 
 
 async def control_test_provider(request: Request) -> JSONResponse:
@@ -359,6 +390,11 @@ async def control_daemon_stop(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def control_daemon_restart(request: Request) -> JSONResponse:
+    """Signal the launcher to restart the gateway."""
+    return JSONResponse({"ok": True, "action": "restart"})
+
+
 def create_app(store: ConfigStore) -> Starlette:
     """Create the full gateway application (endpoints + control API)."""
     global STATE
@@ -374,11 +410,12 @@ def create_app(store: ConfigStore) -> Starlette:
         # Control API
         Route("/api/status", control_status, methods=["GET"]),
         Route("/api/models/switch", control_switch_model, methods=["POST"]),
-        Route("/api/providers", control_providers, methods=["GET", "POST"]),
+        Route("/api/providers", control_providers, methods=["GET", "POST", "DELETE"]),
         Route("/api/providers/test", control_test_provider, methods=["POST"]),
         Route("/api/providers/models", control_fetch_models, methods=["POST"]),
         Route("/api/gateway/config", control_gateway_config, methods=["GET", "POST"]),
         Route("/api/daemon/stop", control_daemon_stop, methods=["POST"]),
+        Route("/api/daemon/restart", control_daemon_restart, methods=["POST"]),
     ]
 
     return Starlette(routes=routes)
@@ -398,9 +435,9 @@ def run_daemon(store: ConfigStore) -> None:
     app = create_app(store)
     control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
 
-    cfg = store.load().get("gateway", {})
-    host = cfg.get("host", "127.0.0.1")
-    gateway_port = cfg.get("port", 11434)
+    gw = _migrate_gateway_config(store.load())
+    host = gw["host"]
+    gateway_port = gw["port"]
 
     ports = [gateway_port]
     if control_port:

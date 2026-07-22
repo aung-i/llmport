@@ -2,7 +2,7 @@
 
 import tempfile
 from llmgate.config.store import ConfigStore
-from llmgate.gateway.server import create_app
+from llmgate.gateway.server import create_app, _migrate_gateway_config
 from starlette.testclient import TestClient
 
 
@@ -150,3 +150,65 @@ def test_gateway_config():
         })
         assert resp.status_code == 400
         assert "端口号超出范围" in resp.json()["error"]
+
+
+def test_config_migration_old_format():
+    """_migrate_gateway_config converts old openai_port format."""
+    data = {"gateway": {"openai_port": 8080}}
+    result = _migrate_gateway_config(data)
+    assert result == {"host": "127.0.0.1", "port": 8080}
+    # Data dict was migrated in place
+    assert data["gateway"] == {"host": "127.0.0.1", "port": 8080}
+
+
+def test_config_migration_empty_gateway():
+    """_migrate_gateway_config with empty gateway uses defaults."""
+    data = {"gateway": {}}
+    result = _migrate_gateway_config(data)
+    assert result == {"host": "127.0.0.1", "port": 11434}
+
+
+def test_provider_delete():
+    """Provider can be deleted via DELETE /api/providers."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        app = create_app(store)
+        client = TestClient(app)
+
+        # Add a provider
+        client.post("/api/providers", json={
+            "id": "test-provider",
+            "name": "Test",
+            "protocol": "openai",
+            "base_url": "https://api.test.com",
+            "api_key": "sk-test",
+            "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
+        })
+
+        # Confirm it exists
+        resp = client.get("/api/providers")
+        assert len(resp.json()) == 1
+
+        # Delete via DELETE
+        resp = client.request("DELETE", "/api/providers", json={"id": "test-provider"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        # Verify list is empty
+        resp = client.get("/api/providers")
+        assert resp.json() == []
+
+
+def test_daemon_restart_endpoint():
+    """POST /api/daemon/restart returns ok with action."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        app = create_app(store)
+        client = TestClient(app)
+
+        resp = client.post("/api/daemon/restart")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["action"] == "restart"

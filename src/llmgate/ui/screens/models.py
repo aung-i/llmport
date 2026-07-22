@@ -2,7 +2,7 @@
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
-from textual.widgets import Static, ListView, ListItem, Label, Button
+from textual.widgets import Static, ListView, ListItem, Label, Button, Input
 from textual.screen import ModalScreen
 
 from llmgate.daemon import DaemonManager
@@ -73,10 +73,12 @@ class ModelsPane(Vertical):
     def __init__(self):
         super().__init__()
         self.models: list[dict] = []
+        self._filtered_models: list[dict] = []
         self.active_model: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("[dim]加载中...[/]", id="active-info")
+        yield Input(placeholder="搜索模型...", id="model-search")
         with Section("模型列表"):
             yield ListView(id="model-list")
         with Horizontal(id="model-actions"):
@@ -124,12 +126,30 @@ class ModelsPane(Vertical):
 
         active_display = self.active_model or "[dim]无[/]"
         self.query_one("#active-info", Static).update(f"当前活跃: [bold $primary]{active_display}[/]")
+        self._filtered_models = list(self.models)
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        """Filter model list by search query."""
+        query = event.value.strip().lower()
+        list_view = self.query_one("#model-list", ListView)
+        await list_view.clear()
+        filtered = [m for m in self.models if query in m["id"].lower()] if query else self.models
+        if not filtered and query:
+            list_view.append(ListItem(Label("[dim]无匹配模型[/]")))
+        else:
+            for m in filtered:
+                if m["id"] == self.active_model:
+                    text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"
+                else:
+                    text = f"  {m['id']}   [dim]({m['provider_count']} 供应商)[/]"
+                list_view.append(ListItem(Label(text)))
+        self._filtered_models = list(filtered) if filtered else []
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-detail":
             list_view = self.query_one("#model-list", ListView)
-            if list_view.index is not None and list_view.index < len(self.models):
-                model = self.models[list_view.index]
+            if list_view.index is not None and list_view.index < len(self._filtered_models):
+                model = self._filtered_models[list_view.index]
                 daemon = self.app.daemon  # type: ignore
                 # Fetch full model data via status endpoint to get bindings
                 port = daemon.get_control_port()
@@ -156,8 +176,8 @@ class ModelsPane(Vertical):
         if event.item is None:
             return
         list_view = self.query_one("#model-list", ListView)
-        if list_view.index is not None and list_view.index < len(self.models):
-            model_id = self.models[list_view.index]["id"]
+        if list_view.index is not None and list_view.index < len(self._filtered_models):
+            model_id = self._filtered_models[list_view.index]["id"]
             daemon = self.app.daemon  # type: ignore
             port = daemon.get_control_port()
             if port:

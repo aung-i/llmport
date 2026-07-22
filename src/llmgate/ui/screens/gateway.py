@@ -114,7 +114,7 @@ class GatewayPane(Vertical):
         config = {"host": "127.0.0.1", "port": 11434}
         if port:
             data = await async_get_json(f"http://127.0.0.1:{port}/api/gateway/config")
-            if data:
+            if data and isinstance(data, dict) and "host" in data:
                 config = data
 
         uptime = status.get("uptime", 0)
@@ -167,6 +167,6 @@ class GatewayPane(Vertical):
             config = {"host": "127.0.0.1", "port": 11434}
             if port:
                 data = await async_get_json(f"http://127.0.0.1:{port}/api/gateway/config")
-                if data:
+                if data and isinstance(data, dict) and "host" in data:
                     config = data
             await self.app.push_screen(GatewayConfigScreen(config))  # type: ignore

@@ -191,11 +191,16 @@ def _parse_models(raw: str) -> list[dict]:
 class ProvidersPane(Vertical):
     """Provider management panel."""
 
+    def __init__(self):
+        super().__init__()
+        self.providers: list[dict] = []
+
     def compose(self) -> ComposeResult:
         with Section("供应商列表"):
             yield ListView(id="provider-list")
         with Horizontal(id="provider-actions"):
             yield Button(" 添加供应商", id="btn-add-provider", variant="primary")
+            yield Button(" 删除供应商", id="btn-delete-provider", variant="error")
 
     async def on_mount(self) -> None:
         await self.refresh_providers()
@@ -206,6 +211,7 @@ class ProvidersPane(Vertical):
         if port is None:
             return
         providers = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
+        self.providers = providers
         list_view = self.query_one("#provider-list", ListView)
         await list_view.clear()
         if not providers:
@@ -224,18 +230,30 @@ class ProvidersPane(Vertical):
             await self.app.push_screen(  # type: ignore
                 ProviderFormScreen(self.app.daemon)  # type: ignore
             )
+        elif event.button.id == "btn-delete-provider":
+            list_view = self.query_one("#provider-list", ListView)
+            if list_view.index is not None and list_view.index < len(self.providers):
+                provider = self.providers[list_view.index]
+                daemon = self.app.daemon  # type: ignore
+                port = daemon.get_control_port()
+                if port:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.delete(
+                            f"http://127.0.0.1:{port}/api/providers",
+                            json={"id": provider["id"]},
+                        )
+                        if resp.status_code == 200:
+                            self.notify(f"已删除: {provider['name']}", title="供应商")
+                        else:
+                            self.notify(f"删除失败", title="供应商", severity="error")
+                    await self.refresh_providers()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.item is None:
             return
-        daemon = self.app.daemon  # type: ignore
-        port = daemon.get_control_port()
-        if port is None:
-            return
-        providers = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
         list_view = self.query_one("#provider-list", ListView)
-        if list_view.index is not None and list_view.index < len(providers):
-            provider = providers[list_view.index]
+        if list_view.index is not None and list_view.index < len(self.providers):
+            provider = self.providers[list_view.index]
             await self.app.push_screen(  # type: ignore
                 ProviderFormScreen(self.app.daemon, provider)  # type: ignore
             )
