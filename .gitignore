@@ -16,3 +16,4 @@ venv/
 *.key
 config.enc
 .superpowers/
+.playwright-mcp/
