@@ -7,11 +7,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse, Response
 from starlette.routing import Route
 
-from llmgate.config.store import ConfigStore
-from llmgate.models.provider import ProviderConfig, ProviderHealth
-from llmgate.models.model import merge_aliases_into_logical_models
-from llmgate.gateway.router import Router, RouterError
-from llmgate.gateway import openai_handler, anthropic_handler
+from llmport.config.store import ConfigStore
+from llmport.models.provider import ProviderConfig, ProviderHealth
+from llmport.models.model import merge_aliases_into_logical_models
+from llmport.gateway.router import Router, RouterError
+from llmport.gateway import openai_handler, anthropic_handler
 
 
 def _migrate_gateway_config(data: dict) -> dict:

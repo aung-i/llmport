@@ -1,4 +1,4 @@
-# llmgate
+# llmport
 
 Terminal LLM API Gateway — 统一入口，多供应商路由/切换/fallback。
 
@@ -14,15 +14,15 @@ Terminal LLM API Gateway — 统一入口，多供应商路由/切换/fallback�
 ## 安装
 
 ```bash
-uv tool install llmgate
+uv tool install llmport
 ```
 
 ## 使用
 
 ```bash
-llmgate          # 打开 TUI，网关自动启动
-llmgate stop     # 停止网关
-llmgate status   # 查看状态
+llmport          # 打开 TUI，网关自动启动
+llmport stop     # 停止网关
+llmport status   # 查看状态
 ```
 
 ## 技术栈

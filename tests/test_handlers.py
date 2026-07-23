@@ -1,7 +1,7 @@
 """Tests for protocol handlers. Uses httpx mock or simple unit checks."""
 
 import pytest
-from llmgate.models.provider import ProviderConfig, ProviderModel
+from llmport.models.provider import ProviderConfig, ProviderModel
 
 
 def make_provider(id: str = "test") -> ProviderConfig:
@@ -16,14 +16,14 @@ def make_provider(id: str = "test") -> ProviderConfig:
 
 
 def test_openai_handler_exists():
-    from llmgate.gateway import openai_handler
+    from llmport.gateway import openai_handler
     assert hasattr(openai_handler, "forward")
     assert hasattr(openai_handler, "stream")
     assert hasattr(openai_handler, "list_models")
 
 
 def test_anthropic_handler_exists():
-    from llmgate.gateway import anthropic_handler
+    from llmport.gateway import anthropic_handler
     assert hasattr(anthropic_handler, "forward")
     assert hasattr(anthropic_handler, "stream")
     assert hasattr(anthropic_handler, "test_connection")

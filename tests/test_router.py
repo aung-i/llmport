@@ -1,9 +1,9 @@
 """Tests for gateway router."""
 
 import pytest
-from llmgate.models.provider import ProviderConfig, ProviderModel, ProviderHealth
-from llmgate.models.model import LogicalModel, ModelBinding
-from llmgate.gateway.router import Router, RouterError
+from llmport.models.provider import ProviderConfig, ProviderModel, ProviderHealth
+from llmport.models.model import LogicalModel, ModelBinding
+from llmport.gateway.router import Router, RouterError
 
 
 def make_provider(id: str, health: str = "up") -> ProviderConfig:

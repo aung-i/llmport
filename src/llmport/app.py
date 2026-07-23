@@ -1,11 +1,11 @@
-"""Main Textual application for llmgate."""
+"""Main Textual application for llmport."""
 
 import os
 from pathlib import Path
 
 try:
     import importlib.metadata as _metadata
-    __version__ = _metadata.version("llmgate")
+    __version__ = _metadata.version("llmport")
 except Exception:
     __version__ = "unknown"
 
@@ -14,19 +14,19 @@ from textual.containers import Horizontal
 from textual.widgets import Static, Footer, TabbedContent, TabPane
 from textual.binding import Binding
 
-from llmgate.daemon import DaemonManager
-from llmgate.ui.screens.models import ModelsPane
-from llmgate.ui.screens.providers import ProvidersPane
-from llmgate.ui.screens.gateway import GatewayPane
-from llmgate.ui.screens.stats import StatsPane
-from llmgate.ui.screens.settings import SettingsPane
-from llmgate.ui.screens.onboarding import OnboardingScreen
+from llmport.daemon import DaemonManager
+from llmport.ui.screens.models import ModelsPane
+from llmport.ui.screens.providers import ProvidersPane
+from llmport.ui.screens.gateway import GatewayPane
+from llmport.ui.screens.stats import StatsPane
+from llmport.ui.screens.settings import SettingsPane
+from llmport.ui.screens.onboarding import OnboardingScreen
 
 
-class LlmGateApp(App):
-    """Main llmgate TUI application."""
+class LlmPortApp(App):
+    """Main llmport TUI application."""
 
-    TITLE = "llmgate"
+    TITLE = "llmport"
     SUB_TITLE = "LLM API Gateway"
 
     CSS = """
@@ -225,7 +225,7 @@ class LlmGateApp(App):
             "XDG_CONFIG_HOME",
             os.path.join(Path.home(), ".config"),
         )
-        key_path = Path(config_dir) / "llmgate" / "key"
+        key_path = Path(config_dir) / "llmport" / "key"
         if not key_path.exists():
             self.push_screen(OnboardingScreen())
 
@@ -235,7 +235,7 @@ class LlmGateApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="app-header"):
-            yield Static("llmgate", classes="")
+            yield Static("llmport", classes="")
             yield Static(f"v{__version__}", classes="version")
         with TabbedContent():
             with TabPane("⚙ 网关", id="gateway"):

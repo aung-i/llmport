@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.widgets import Static, Button
 
-from llmgate.ui.widgets import Card, Section
+from llmport.ui.widgets import Card, Section
 
 
 class SettingsPane(Vertical):
@@ -16,7 +16,7 @@ class SettingsPane(Vertical):
                 yield Button(" 导出配置", id="btn-export", variant="default")
                 yield Button(" 导入配置", id="btn-import", variant="default")
         with Section("关于"):
-            yield Static("[bold $primary]llmgate[/]  [dim]v0.1.0[/]")
+            yield Static("[bold $primary]llmport[/]  [dim]v0.1.0[/]")
             yield Static("[dim]Terminal LLM API Gateway[/]")
             yield Static("")
             yield Static("[dim]多供应商路由 · 透明协议转发 · 故障自动切换[/]")

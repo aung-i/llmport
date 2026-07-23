@@ -1,4 +1,4 @@
-"""Encrypted YAML config store for ~/.config/llmgate/."""
+"""Encrypted YAML config store for ~/.config/llmport/."""
 
 import os
 import tempfile
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from llmgate.config.crypto import generate_key, encrypt, decrypt
+from llmport.config.crypto import generate_key, encrypt, decrypt
 
 
 class ConfigStore:
@@ -15,7 +15,7 @@ class ConfigStore:
             self.dir = Path(config_dir)
         else:
             xdg = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
-            self.dir = Path(xdg) / "llmgate"
+            self.dir = Path(xdg) / "llmport"
         self.key_path = self.dir / "key"
         self.config_path = self.dir / "config.enc"
 

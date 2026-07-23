@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from llmgate.config.store import ConfigStore
+from llmport.config.store import ConfigStore
 
 
 def test_init_first_run_creates_key_and_config():

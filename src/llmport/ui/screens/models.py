@@ -5,9 +5,9 @@ from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, ListView, ListItem, Label, Button, Input
 from textual.screen import ModalScreen
 
-from llmgate.daemon import DaemonManager
-from llmgate.ui.screens.onboarding import async_get_json
-from llmgate.ui.widgets import Section
+from llmport.daemon import DaemonManager
+from llmport.ui.screens.onboarding import async_get_json
+from llmport.ui.widgets import Section
 
 
 class ModelDetailScreen(ModalScreen):

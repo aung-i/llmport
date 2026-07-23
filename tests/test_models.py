@@ -1,7 +1,7 @@
 """Tests for data models."""
 
-from llmgate.models.provider import ProviderConfig, ProviderModel
-from llmgate.models.model import (
+from llmport.models.provider import ProviderConfig, ProviderModel
+from llmport.models.model import (
     ModelBinding,
     LogicalModel,
     merge_aliases_into_logical_models,

@@ -7,7 +7,7 @@ from textual.screen import ModalScreen
 from textual.containers import Container, Horizontal
 from textual.widgets import Static, Button
 
-from llmgate.config.store import ConfigStore
+from llmport.config.store import ConfigStore
 
 
 async def async_get_json(url: str) -> dict | list | None:
@@ -66,7 +66,7 @@ class OnboardingScreen(ModalScreen):
 
         if self._step == 0:
             content.update(
-                "[bold $primary]llmgate[/] — Terminal LLM API Gateway\n\n"
+                "[bold $primary]llmport[/] — Terminal LLM API Gateway\n\n"
                 "检测到你是第一次使用。\n\n"
                 "[dim]本向导将帮助你快速完成初始配置。[/]"
             )
@@ -82,7 +82,7 @@ class OnboardingScreen(ModalScreen):
             store.init_first_run()
             self._step = 1
             # Import lazily to avoid circular dependency
-            from llmgate.ui.screens.providers import ProviderFormScreen
+            from llmport.ui.screens.providers import ProviderFormScreen
 
             self.app.notify("配置已初始化，请添加你的第一个 Provider", title="第一步")  # type: ignore
             await self.app.push_screen(  # type: ignore

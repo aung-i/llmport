@@ -5,8 +5,8 @@ from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, Button, Input, Label, Select
 from textual.screen import ModalScreen
 
-from llmgate.ui.widgets import Card, Section
-from llmgate.ui.screens.onboarding import async_get_json
+from llmport.ui.widgets import Card, Section
+from llmport.ui.screens.onboarding import async_get_json
 
 
 class GatewayConfigScreen(ModalScreen):

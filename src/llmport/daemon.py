@@ -21,7 +21,7 @@ class DaemonManager:
             self.dir = Path(config_dir)
         else:
             xdg = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
-            self.dir = Path(xdg) / "llmgate"
+            self.dir = Path(xdg) / "llmport"
         self.pid_path = self.dir / "daemon.pid"
 
     def is_running(self) -> bool:
@@ -86,7 +86,7 @@ class DaemonManager:
         env = os.environ.copy()
         env["LLMGATE_CONTROL_PORT"] = str(control_port)
         cmd = [
-            sys.executable, "-m", "llmgate",
+            sys.executable, "-m", "llmport",
             "--daemon",
         ]
         proc = subprocess.Popen(
@@ -142,13 +142,13 @@ class DaemonManager:
 
 
 def run_daemon() -> None:
-    """Entry point for daemon mode. Called when llmgate is run with --daemon."""
+    """Entry point for daemon mode. Called when llmport is run with --daemon."""
     import os
     import time
     import json
 
-    from llmgate.config.store import ConfigStore
-    from llmgate.gateway.server import run_daemon as _server_run_daemon
+    from llmport.config.store import ConfigStore
+    from llmport.gateway.server import run_daemon as _server_run_daemon
 
     store = ConfigStore()
     if not store.key_path.exists():
@@ -160,7 +160,7 @@ def run_daemon() -> None:
         "XDG_CONFIG_HOME",
         os.path.join(os.path.expanduser("~"), ".config"),
     )
-    pid_dir = os.path.join(config_dir, "llmgate")
+    pid_dir = os.path.join(config_dir, "llmport")
     os.makedirs(pid_dir, exist_ok=True)
     pid_path = os.path.join(pid_dir, "daemon.pid")
     pid_path_write = pid_path  # alias for clarity in json.dumps below

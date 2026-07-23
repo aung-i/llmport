@@ -1,8 +1,8 @@
 """End-to-end integration test for config + gateway flow."""
 
 import tempfile
-from llmgate.config.store import ConfigStore
-from llmgate.gateway.server import create_app, _migrate_gateway_config
+from llmport.config.store import ConfigStore
+from llmport.gateway.server import create_app, _migrate_gateway_config
 from starlette.testclient import TestClient
 
 

@@ -1,8 +1,8 @@
-# llmgate Fix Design — 2026-07-22
+# llmport Fix Design — 2026-07-22
 
 **Status:** Approved
 **Scope:** Crash fixes, missing v1 features
-**Based on:** `2026-07-21-llmgate-design.md` spec + three exploration reports
+**Based on:** `2026-07-21-llmport-design.md` spec + three exploration reports
 
 ---
 

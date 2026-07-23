@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from llmgate.models.provider import ProviderConfig
+from llmport.models.provider import ProviderConfig
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""Reusable TUI widgets for llmgate."""
+"""Reusable TUI widgets for llmport."""
 
 from textual.app import ComposeResult
 from textual.containers import Container

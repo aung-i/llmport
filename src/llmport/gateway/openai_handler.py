@@ -2,7 +2,7 @@
 
 import httpx
 
-from llmgate.models.provider import ProviderConfig
+from llmport.models.provider import ProviderConfig
 
 
 FORWARD_HEADERS = {"content-type", "authorization", "x-api-key", "x-request-id"}

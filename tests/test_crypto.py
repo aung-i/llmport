@@ -1,6 +1,6 @@
 """Tests for config crypto module."""
 
-from llmgate.config.crypto import generate_key, encrypt, decrypt
+from llmport.config.crypto import generate_key, encrypt, decrypt
 
 
 def test_encrypt_decrypt_roundtrip():

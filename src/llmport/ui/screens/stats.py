@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
-from llmgate.ui.widgets import Card, Section
+from llmport.ui.widgets import Card, Section
 
 
 class StatsPane(Vertical):

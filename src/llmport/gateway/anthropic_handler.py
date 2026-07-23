@@ -2,7 +2,7 @@
 
 import httpx
 
-from llmgate.models.provider import ProviderConfig
+from llmport.models.provider import ProviderConfig
 
 
 def _build_headers(provider: ProviderConfig) -> dict:

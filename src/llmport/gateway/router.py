@@ -1,7 +1,7 @@
 """Route requests to the right provider based on active model and priority."""
 
-from llmgate.models.provider import ProviderConfig
-from llmgate.models.model import LogicalModel
+from llmport.models.provider import ProviderConfig
+from llmport.models.model import LogicalModel
 
 
 class RouterError(Exception):

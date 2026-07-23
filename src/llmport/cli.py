@@ -1,16 +1,16 @@
-"""CLI entry point for llmgate."""
+"""CLI entry point for llmport."""
 
 import sys
 import argparse
 import json
 import urllib.request
 
-from llmgate.daemon import DaemonManager, run_daemon
+from llmport.daemon import DaemonManager, run_daemon
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="llmgate",
+        prog="llmport",
         description="Terminal LLM API Gateway",
     )
     parser.add_argument(
@@ -76,6 +76,6 @@ def main() -> None:
         return
 
     # Default: launch TUI
-    from llmgate.app import LlmGateApp
-    app = LlmGateApp()
+    from llmport.app import LlmPortApp
+    app = LlmPortApp()
     app.run()

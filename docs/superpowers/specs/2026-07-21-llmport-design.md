@@ -1,16 +1,16 @@
-# llmgate Design Spec
+# llmport Design Spec
 
 **Date:** 2026-07-21
 **Status:** Review
 
 ## Overview
 
-llmgate is a terminal-based LLM API Gateway. It runs as a daemon on your machine, providing a unified API endpoint for all your tools while managing multiple LLM providers, API keys, model aliases, fallback routing, and health monitoring through a Textual TUI.
+llmport is a terminal-based LLM API Gateway. It runs as a daemon on your machine, providing a unified API endpoint for all your tools while managing multiple LLM providers, API keys, model aliases, fallback routing, and health monitoring through a Textual TUI.
 
 ### Core Philosophy
 
 - **Configure by provider, use by model.** You set up providers with their keys and protocols. Daily use is just picking a model name.
-- **TUI-first, gateway-second.** `llmgate` opens the TUI. The gateway daemon starts automatically and keeps running when you close the TUI.
+- **TUI-first, gateway-second.** `llmport` opens the TUI. The gateway daemon starts automatically and keeps running when you close the TUI.
 - **Zero friction.** No master password, no config files to hand-edit. Random key auto-generated on first run for local encryption. All operations in the TUI.
 
 ---
@@ -25,7 +25,7 @@ llmgate is a terminal-based LLM API Gateway. It runs as a daemon on your machine
 | Gateway server | uvicorn + starlette |
 | Encryption | cryptography (Fernet) |
 | Package management | uv |
-| Distribution | `uv tool install llmgate` |
+| Distribution | `uv tool install llmport` |
 
 ---
 
@@ -33,7 +33,7 @@ llmgate is a terminal-based LLM API Gateway. It runs as a daemon on your machine
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  llmgate    │     │  llmgate daemon  │     │  Providers  │
+│  llmport    │     │  llmport daemon  │     │  Providers  │
 │  (TUI)      │ ←→  │  (gateway)       │ ←→  │  OpenAI     │
 │  Textual    │ IPC │  uvicorn         │     │  Anthropic  │
 │             │     │                  │     │  Groq       │
@@ -57,7 +57,7 @@ The port and base path the client uses determines the protocol. If the current m
 
 ### Control API (internal)
 
-The TUI talks to the daemon via a local-only HTTP API on `127.0.0.1`. The daemon writes its control port to `~/.config/llmgate/daemon.pid` on startup. The TUI reads this file to discover the daemon.
+The TUI talks to the daemon via a local-only HTTP API on `127.0.0.1`. The daemon writes its control port to `~/.config/llmport/daemon.pid` on startup. The TUI reads this file to discover the daemon.
 
 ```
 GET  /api/status        — daemon status, uptime, active model
@@ -72,10 +72,10 @@ POST /api/daemon/restart — restart daemon
 
 ### Daemon Lifecycle
 
-- On `llmgate` launch, TUI checks if `~/.config/llmgate/daemon.pid` exists and if the port is alive.
+- On `llmport` launch, TUI checks if `~/.config/llmport/daemon.pid` exists and if the port is alive.
 - If alive → TUI connects to existing daemon.
 - If not alive → TUI starts daemon as a subprocess, writes new PID file.
-- On `llmgate stop` → TUI calls `POST /api/daemon/stop`, daemon cleans up PID file and exits.
+- On `llmport stop` → TUI calls `POST /api/daemon/stop`, daemon cleans up PID file and exits.
 - If TUI exits normally (Ctrl+C, quit), daemon keeps running.
 - If daemon crashes, PID file is stale; TUI detects this on next launch and restarts.
 
@@ -136,15 +136,15 @@ active_model_name: "claude-opus-4-820250710"
 
 ### Encryption
 
-1. On first run, a random Fernet key is generated and saved to `~/.config/llmgate/key`.
-2. API keys are encrypted with this key before writing to `~/.config/llmgate/config.enc`.
+1. On first run, a random Fernet key is generated and saved to `~/.config/llmport/key`.
+2. API keys are encrypted with this key before writing to `~/.config/llmport/config.enc`.
 3. The daemon reads the key at startup, decrypts config, holds keys in memory.
 4. No master password. No external dependencies (keychain, secret service, etc.).
 
 ### Config Format
 
 ```yaml
-# ~/.config/llmgate/config.yaml (before encryption)
+# ~/.config/llmport/config.yaml (before encryption)
 version: 1
 gateway:
   openai_port: 11434
@@ -169,7 +169,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 ### Page 1: Models (home)
 
 ```
-┌─ llmgate ──────────────────────┐
+┌─ llmport ──────────────────────┐
 │  ◉ 模型  ○ 供应商  ○ 网关  ○ 统计  ○ 设置 │
 ├───────────────────────────────┤
 │                               │
@@ -195,7 +195,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 ### Page 1b: Model Detail (Enter from model list)
 
 ```
-┌─ llmgate ───────────────────┐
+┌─ llmport ───────────────────┐
 │  ← 返回                      │
 ├──────────────────────────────┤
 │  claude-opus                 │
@@ -221,7 +221,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 ### Page 2: Providers
 
 ```
-┌─ llmgate ──────────────────────┐
+┌─ llmport ──────────────────────┐
 │  ○ 模型  ◉ 供应商  ○ 网关  ○ 统计  ○ 设置 │
 ├───────────────────────────────┤
 │                               │
@@ -274,7 +274,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 ### Page 3: Gateway
 
 ```
-┌─ llmgate ──────────────────────┐
+┌─ llmport ──────────────────────┐
 │  ○ 模型  ○ 供应商  ◉ 网关  ○ 统计  ○ 设置 │
 ├───────────────────────────────┤
 │                               │
@@ -300,7 +300,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 ### Page 4: Statistics
 
 ```
-┌─ llmgate ──────────────────────┐
+┌─ llmport ──────────────────────┐
 │  ○ 模型  ○ 供应商  ○ 网关  ◉ 统计  ○ 设置 │
 ├───────────────────────────────┤
 │                               │
@@ -323,7 +323,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 ### Page 5: Settings
 
 ```
-┌─ llmgate ──────────────────────┐
+┌─ llmport ──────────────────────┐
 │  ○ 模型  ○ 供应商  ○ 网关  ○ 统计  ◉ 设置 │
 ├───────────────────────────────┤
 │                               │
@@ -332,7 +332,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 │  导入配置               [导入]  │
 │                               │
 │  版本                          │
-│  llmgate v0.1.0               │
+│  llmport v0.1.0               │
 │  [检查更新]                    │
 └───────────────────────────────┘
 ```
@@ -342,7 +342,7 @@ Navigation: `←` `→` to switch tabs, `↑` `↓` to move within a tab, `Enter
 On first launch with no config:
 
 ```
-┌─ 欢迎使用 llmgate ────────────┐
+┌─ 欢迎使用 llmport ────────────┐
 │                               │
 │  检测到你是第一次使用            │
 │                               │
@@ -409,7 +409,7 @@ Client receives response
 | 17 | TUI | Providers page: add, edit, delete, test |
 | 18 | TUI | Model detail page: bind providers, adjust priority, routing strategy |
 | 19 | TUI | Arrow keys + mouse navigation, no vim keys |
-| 20 | CLI | Single binary entry: `llmgate` |
+| 20 | CLI | Single binary entry: `llmport` |
 | 21 | CLI | `uv tool install` distribution |
 | 22 | Onboarding | First-run wizard: generate key → add provider → start gateway |
 
@@ -430,11 +430,11 @@ Client receives response
 ## Project Structure (planned)
 
 ```
-llmgate/
+llmport/
 ├── pyproject.toml
 ├── README.md
 ├── src/
-│   └── llmgate/
+│   └── llmport/
 │       ├── __init__.py
 │       ├── cli.py              # entry point, arg parsing
 │       ├── app.py               # Textual app

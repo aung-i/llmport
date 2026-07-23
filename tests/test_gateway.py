@@ -1,9 +1,9 @@
 """Integration tests for gateway server."""
 
 import pytest
-from llmgate.config.store import ConfigStore
-from llmgate.gateway.server import create_app
-from llmgate.models.provider import ProviderConfig, ProviderModel
+from llmport.config.store import ConfigStore
+from llmport.gateway.server import create_app
+from llmport.models.provider import ProviderConfig, ProviderModel
 
 
 def test_create_app_returns_starlette():
