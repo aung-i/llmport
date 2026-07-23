@@ -229,10 +229,6 @@ class LlmPortApp(App):
         if not key_path.exists():
             self.push_screen(OnboardingScreen())
 
-        # Ensure daemon is running
-        if not self.daemon.is_running():
-            self.daemon.start()
-
     def compose(self) -> ComposeResult:
         with Horizontal(id="app-header"):
             yield Static("llmport", classes="")

@@ -91,9 +91,10 @@ class GatewayPane(Vertical):
         with Section("供应商健康"):
             yield Static("加载中...", id="health-list")
         with Horizontal(id="gateway-actions"):
-            yield Button(" 端口配置", id="btn-config", variant="default")
+            yield Button(" 启动网关", id="btn-start-gateway", variant="success")
             yield Button(" 重启网关", id="btn-restart-gateway", variant="warning")
             yield Button(" 停止网关", id="btn-stop-gateway", variant="error")
+            yield Button(" 端口配置", id="btn-config", variant="default")
 
     async def on_mount(self) -> None:
         self.set_interval(5.0, self.refresh_status)
@@ -109,6 +110,9 @@ class GatewayPane(Vertical):
             self.query_one("#gateway-endpoints", Static).update("[dim]等待启动...[/]")
             self.query_one("#gateway-stats", Static).update("[dim]等待网关启动...[/]")
             self.query_one("#health-list", Static).update("")
+            self.query_one("#btn-start-gateway", Button).display = True
+            self.query_one("#btn-stop-gateway", Button).display = False
+            self.query_one("#btn-restart-gateway", Button).display = False
             return
 
         config = {"host": "127.0.0.1", "port": 11434}
@@ -123,6 +127,9 @@ class GatewayPane(Vertical):
         base = f"http://{config['host']}:{config['port']}"
 
         self.query_one("#gateway-status", Static).update("[green]● 运行中[/]")
+        self.query_one("#btn-start-gateway", Button).display = False
+        self.query_one("#btn-stop-gateway", Button).display = True
+        self.query_one("#btn-restart-gateway", Button).display = True
 
         self.query_one("#gateway-endpoints", Static).update(
             f"  [bold]{base}[/]\n"
@@ -154,7 +161,11 @@ class GatewayPane(Vertical):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         daemon = self.app.daemon  # type: ignore
-        if event.button.id == "btn-stop-gateway":
+        if event.button.id == "btn-start-gateway":
+            daemon.start()
+            self.notify("网关已启动", title="网关")
+            await self.refresh_status()
+        elif event.button.id == "btn-stop-gateway":
             daemon.stop()
             self.notify("网关已停止", title="网关")
             await self.refresh_status()
