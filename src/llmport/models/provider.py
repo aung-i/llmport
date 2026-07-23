@@ -29,13 +29,12 @@ class ProviderConfig:
     models: list[ProviderModel] = field(default_factory=list)
     health: ProviderHealth = field(default_factory=ProviderHealth)
 
-    def to_dict(self) -> dict:
-        return {
+    def to_dict(self, include_key: bool = True) -> dict:
+        result: dict = {
             "id": self.id,
             "name": self.name,
             "protocol": self.protocol,
             "base_url": self.base_url,
-            "api_key": self.api_key,
             "models": [{"name": m.name, "aliases": m.aliases} for m in self.models],
             "health": {
                 "status": self.health.status,
@@ -43,6 +42,11 @@ class ProviderConfig:
                 "last_check": self.health.last_check,
             },
         }
+        if include_key:
+            result["api_key"] = self.api_key
+        else:
+            result["api_key"] = "***" if self.api_key else ""
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProviderConfig":

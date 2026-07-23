@@ -21,10 +21,11 @@ class ConfigStore:
 
     def init_first_run(self) -> None:
         """Create config directory, generate key, write empty config."""
-        self.dir.mkdir(parents=True, exist_ok=True)
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not self.key_path.exists():
             key = generate_key()
             self.key_path.write_bytes(key)
+            self.key_path.chmod(0o600)
         default = {
             "version": 1,
             "gateway": {"host": "127.0.0.1", "port": 11434},

@@ -287,7 +287,7 @@ async def control_switch_model(request: Request) -> JSONResponse:
 async def control_providers(request: Request) -> JSONResponse:
     state = _get_state()
     if request.method == "GET":
-        return JSONResponse([p.to_dict() for p in state.providers])
+        return JSONResponse([p.to_dict(include_key=False) for p in state.providers])
     elif request.method == "POST":
         body = await request.json()
         provider = ProviderConfig.from_dict(body)
