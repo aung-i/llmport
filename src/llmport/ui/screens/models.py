@@ -1,13 +1,18 @@
 """Models tab — the main daily-use screen."""
 
+from typing import TYPE_CHECKING, cast
+
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, ListView, ListItem, Label, Button, Input
 from textual.screen import ModalScreen
 
 from llmport.daemon import DaemonManager
-from llmport.ui.screens.onboarding import async_get_json
+from llmport.ui import async_get_json
 from llmport.ui.widgets import Section
+
+if TYPE_CHECKING:
+    from llmport.app import LlmPortApp
 
 
 class ModelDetailScreen(ModalScreen):
@@ -95,7 +100,7 @@ class ModelsPane(Vertical):
         await self.refresh_models()
 
     async def refresh_models(self) -> None:
-        daemon = self.app.daemon  # type: ignore
+        daemon = cast("LlmPortApp", self.app).daemon
         status = await daemon.async_get_status()
         port = daemon.get_control_port()
         if port is None:
@@ -150,7 +155,7 @@ class ModelsPane(Vertical):
             list_view = self.query_one("#model-list", ListView)
             if list_view.index is not None and list_view.index < len(self._filtered_models):
                 model = self._filtered_models[list_view.index]
-                daemon = self.app.daemon  # type: ignore
+                daemon = cast("LlmPortApp", self.app).daemon
                 # Fetch full model data via /api/models endpoint
                 port = daemon.get_control_port()
                 bindings = []
@@ -170,8 +175,9 @@ class ModelsPane(Vertical):
                             bindings = m.get("bindings", [])
                             break
                 model_with_bindings = {**model, "bindings": bindings}
-                await self.app.push_screen(  # type: ignore
-                    ModelDetailScreen(model_with_bindings, self.app.daemon)  # type: ignore
+                _m_app = cast("LlmPortApp", self.app)
+                await _m_app.push_screen(
+                    ModelDetailScreen(model_with_bindings, _m_app.daemon)
                 )
         elif event.button.id == "btn-add":
             self.notify("在供应商页添加模型别名即可自动关联", title="提示")
@@ -182,7 +188,7 @@ class ModelsPane(Vertical):
         list_view = self.query_one("#model-list", ListView)
         if list_view.index is not None and list_view.index < len(self._filtered_models):
             model_id = self._filtered_models[list_view.index]["id"]
-            daemon = self.app.daemon  # type: ignore
+            daemon = cast("LlmPortApp", self.app).daemon
             port = daemon.get_control_port()
             if port is None:
                 self.notify("网关未运行", title="模型切换", severity="error")

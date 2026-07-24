@@ -8,8 +8,9 @@ from llmport.models.provider import ProviderConfig
 @dataclass
 class ModelBinding:
     """Binds a logical model to a specific provider's model name with priority."""
+
     provider_id: str
-    model_name: str               # actual name on that provider
+    model_name: str  # actual name on that provider
     priority: int = 1
 
 
@@ -18,8 +19,17 @@ class LogicalModel:
     """A model as seen and selected by the user.
 
     Auto-created from provider model aliases that share the same alias string.
+
+    Attributes:
+        id: The alias that created/identifies this model.
+        bindings: Provider bindings sorted by priority.
+        routing_strategy: Determines how fallback works when the primary
+            provider fails.  Currently only ``"priority_fallback"`` is
+            supported: providers are tried in priority order and the first
+            healthy one is used.  Future strategies may include
+            ``"round_robin"`` or ``"latency_optimized"``.
     """
-    id: str                       # the alias that created/identifies this model
+    id: str
     bindings: list[ModelBinding] = field(default_factory=list)
     routing_strategy: str = "priority_fallback"
 

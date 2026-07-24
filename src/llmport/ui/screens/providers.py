@@ -1,5 +1,7 @@
 """Providers tab — manage LLM provider configurations."""
 
+from typing import TYPE_CHECKING, cast
+
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, ListView, ListItem, Label, Button, Input, Select
@@ -7,8 +9,11 @@ from textual.screen import ModalScreen
 import httpx
 
 from llmport.daemon import DaemonManager
+
+if TYPE_CHECKING:
+    from llmport.app import LlmPortApp
 from llmport.models.parser import parse_models
-from llmport.ui.screens.onboarding import async_get_json
+from llmport.ui import async_get_json
 from llmport.ui.widgets import Section
 
 
@@ -42,6 +47,7 @@ class ProviderFormScreen(ModalScreen):
         self.daemon = daemon
         self.provider = provider
         self.is_edit = provider is not None
+        self._key_cleared = False  # set True when user clicks "清空"
 
     def compose(self) -> ComposeResult:
         with Container(id="form-container"):
@@ -55,12 +61,14 @@ class ProviderFormScreen(ModalScreen):
                 id="input-name",
             )
             yield Label("[dim]API Key[/]")
-            yield Input(
-                value="",
-                placeholder="保留原值，留空则不修改" if self.is_edit else "sk-ant-api03-...",
-                password=True,
-                id="input-key",
-            )
+            with Horizontal():
+                yield Input(
+                    value="",
+                    placeholder="保留原值，留空则不修改" if self.is_edit else "sk-ant-api03-...",
+                    password=True,
+                    id="input-key",
+                )
+                yield Button(" 清空", id="btn-clear-key", variant="error")
             yield Label("[dim]地址[/]")
             yield Input(
                 value=self.provider.get("base_url", "") if self.provider else "",
@@ -99,10 +107,23 @@ class ProviderFormScreen(ModalScreen):
             self.dismiss()
             return
 
+        if event.button.id == "btn-clear-key":
+            self.query_one("#input-key", Input).value = ""
+            self._key_cleared = True
+            self.notify("API Key 已清空 — 保存后将清除密钥", title="API Key")
+            return
+
         name = self.query_one("#input-name", Input).value
         raw_key = self.query_one("#input-key", Input).value
-        # When editing and key field is empty, signal "keep existing"
-        key = raw_key if raw_key else ("***" if self.is_edit else "")
+        # When editing and key field is empty:
+        #   - if user clicked "清空" → send "" to clear the key
+        #   - otherwise → send "***" to keep existing key
+        if self._key_cleared:
+            key = ""
+        elif raw_key:
+            key = raw_key
+        else:
+            key = "***" if self.is_edit else ""
         url = self.query_one("#input-url", Input).value
         protocol = self.query_one("#select-protocol", Select).value
         models_raw = self.query_one("#input-models", Input).value
@@ -178,7 +199,7 @@ class ProviderFormScreen(ModalScreen):
                     return
             self.notify(f"已保存: {name}", title="供应商")
             self.dismiss()
-            await self.app.query_one(ProvidersPane).refresh_providers()  # type: ignore
+            await cast("LlmPortApp", self.app).query_one(ProvidersPane).refresh_providers()
 
 
 class ProvidersPane(Vertical):
@@ -200,7 +221,7 @@ class ProvidersPane(Vertical):
         await self.refresh_providers()
 
     async def refresh_providers(self) -> None:
-        daemon = self.app.daemon  # type: ignore
+        daemon = cast("LlmPortApp", self.app).daemon
         port = daemon.get_control_port()
         if port is None:
             list_view = self.query_one("#provider-list", ListView)
@@ -224,14 +245,15 @@ class ProvidersPane(Vertical):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-add-provider":
-            await self.app.push_screen(  # type: ignore
-                ProviderFormScreen(self.app.daemon)  # type: ignore
+            _p_app = cast("LlmPortApp", self.app)
+            await _p_app.push_screen(
+                ProviderFormScreen(_p_app.daemon)
             )
         elif event.button.id == "btn-delete-provider":
             list_view = self.query_one("#provider-list", ListView)
             if list_view.index is not None and list_view.index < len(self.providers):
                 provider = self.providers[list_view.index]
-                daemon = self.app.daemon  # type: ignore
+                daemon = cast("LlmPortApp", self.app).daemon
                 port = daemon.get_control_port()
                 if port is None:
                     self.notify("网关未运行，无法删除", title="供应商", severity="error")
@@ -253,6 +275,7 @@ class ProvidersPane(Vertical):
         list_view = self.query_one("#provider-list", ListView)
         if list_view.index is not None and list_view.index < len(self.providers):
             provider = self.providers[list_view.index]
-            await self.app.push_screen(  # type: ignore
-                ProviderFormScreen(self.app.daemon, provider)  # type: ignore
+            _p_app2 = cast("LlmPortApp", self.app)
+            await _p_app2.push_screen(
+                ProviderFormScreen(_p_app2.daemon, provider)
             )

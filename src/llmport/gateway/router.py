@@ -9,6 +9,18 @@ class RouterError(Exception):
 
 
 class Router:
+    """Routes requests to the right provider based on active model and priority.
+
+    The routing strategy (``routing_strategy`` on :class:`LogicalModel`)
+    determines fallback behaviour.  Currently only ``"priority_fallback"``
+    is implemented:
+
+    - ``resolve()`` returns the first healthy provider from the sorted
+      binding list.
+    - ``try_fallback()`` returns the **next** healthy provider after the
+      one that just failed, skipping ``"down"`` providers.
+    """
+
     def __init__(
         self,
         providers: list[ProviderConfig],
@@ -27,6 +39,9 @@ class Router:
 
     def resolve(self) -> tuple[ProviderConfig, str]:
         """Resolve the active model to a specific provider and model name.
+
+        Implements ``"priority_fallback"``: iterates bindings sorted by
+        priority and returns the first healthy (non-``"down"``) provider.
 
         Returns (provider, actual_model_name).
         Raises RouterError if no active model or no bindings.

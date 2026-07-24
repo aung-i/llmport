@@ -8,6 +8,7 @@ headers and defaults so the call sites in ``server.py`` remain unchanged.
 import httpx
 
 from llmport.models.provider import ProviderConfig
+from llmport.gateway.ip_utils import validate_public_url
 
 
 async def forward(
@@ -23,7 +24,9 @@ async def forward(
     url = f"{provider.base_url.rstrip('/')}{path}"
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            resp = await client.post(url, json=body, headers=headers)
+            resp = await client.post(
+                url, json=body, headers=headers, allow_redirects=False
+            )
             if resp.status_code < 400:
                 return resp.json(), None
             return None, f"Provider returned {resp.status_code}: {resp.text[:500]}"
@@ -55,7 +58,11 @@ async def stream(
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             async with client.stream(
-                "POST", url, json=body, headers=forward_headers
+                "POST",
+                url,
+                json=body,
+                headers=forward_headers,
+                allow_redirects=False,
             ) as resp:
                 if resp.status_code >= 400:
                     error_body = await resp.aread()

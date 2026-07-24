@@ -26,7 +26,7 @@ def main() -> None:
     parser.add_argument(
         "action",
         nargs="?",
-        choices=["stop", "status"],
+        choices=["start", "stop", "restart", "status"],
         help="Control the gateway daemon",
     )
 
@@ -38,12 +38,30 @@ def main() -> None:
 
     dm = DaemonManager()
 
+    if args.action == "start":
+        if dm.is_running():
+            print("Gateway is already running.")
+        else:
+            dm.start()
+            print("Gateway started.")
+        return
+
     if args.action == "stop":
         if dm.is_running():
             dm.stop()
             print("Gateway stopped.")
         else:
             print("Gateway is not running.")
+        return
+
+    if args.action == "restart":
+        if dm.is_running():
+            dm.restart()
+            print("Gateway restarted.")
+        else:
+            print("Gateway is not running — starting...")
+            dm.start()
+            print("Gateway started.")
         return
 
     if args.action == "status":

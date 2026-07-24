@@ -1,12 +1,17 @@
 """Gateway tab — daemon status, health checks, configuration."""
 
-from textual.app import ComposeResult
+from typing import TYPE_CHECKING, cast
+
+from textual.app import App, ComposeResult
 from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, Button, Input, Label
 from textual.screen import ModalScreen
 
 from llmport.ui.widgets import Card, Section
-from llmport.ui.screens.onboarding import async_get_json
+from llmport.ui import async_get_json
+
+if TYPE_CHECKING:
+    from llmport.app import LlmPortApp
 
 
 class GatewayConfigScreen(ModalScreen):
@@ -62,7 +67,8 @@ class GatewayConfigScreen(ModalScreen):
 
         if event.button.id == "btn-save-restart":
             import httpx
-            daemon = self.app.daemon  # type: ignore
+            _app = cast("LlmPortApp", self.app)
+            daemon = _app.daemon
             port = daemon.get_control_port()
             if port is None:
                 self.notify("网关未运行，无法保存配置", title="网关配置", severity="error")
@@ -83,13 +89,10 @@ class GatewayConfigScreen(ModalScreen):
                 if not result.get("ok"):
                     self.notify(f"失败: {result.get('error', '')}", title="网关配置", severity="error")
                     return
-                if result.get("warning"):
-                    self.notify(f"地址已更新: {new_host}:{new_port}\n[warning]{result['warning']}[/]", title="网关配置")
-                else:
-                    self.notify(f"地址已更新: {new_host}:{new_port}", title="网关配置")
+                self.notify(f"地址已更新: {new_host}:{new_port}", title="网关配置")
             daemon.restart()
             self.dismiss()
-            await self.app.query_one(GatewayPane).refresh_status()  # type: ignore
+            await cast("LlmPortApp", self.app).query_one(GatewayPane).refresh_status()
 
 
 class GatewayPane(Vertical):
@@ -115,7 +118,8 @@ class GatewayPane(Vertical):
         await self.refresh_status()
 
     async def refresh_status(self) -> None:
-        daemon = self.app.daemon  # type: ignore
+        _app = cast("LlmPortApp", self.app)
+        daemon = _app.daemon
         status = await daemon.async_get_status()
         port = daemon.get_control_port()
 
@@ -174,7 +178,7 @@ class GatewayPane(Vertical):
             self.query_one("#health-list", Static).update("\n".join(lines))
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        daemon = self.app.daemon  # type: ignore
+        daemon = cast("LlmPortApp", self.app).daemon
         if event.button.id == "btn-start-gateway":
             daemon.start()
             self.notify("网关已启动", title="网关")
@@ -194,4 +198,4 @@ class GatewayPane(Vertical):
                 data = await async_get_json(f"http://127.0.0.1:{port}/api/gateway/config")
                 if data and isinstance(data, dict) and "host" in data:
                     config = data
-            await self.app.push_screen(GatewayConfigScreen(config))  # type: ignore
+            await cast("LlmPortApp", self.app).push_screen(GatewayConfigScreen(config))

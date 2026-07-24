@@ -1,10 +1,15 @@
 """Statistics tab — usage data."""
 
+from typing import TYPE_CHECKING, cast
+
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
 from llmport.ui.widgets import Card, Section
+
+if TYPE_CHECKING:
+    from llmport.app import LlmPortApp
 
 
 class StatsPane(Vertical):
@@ -21,7 +26,7 @@ class StatsPane(Vertical):
         await self.refresh_stats()
 
     async def refresh_stats(self) -> None:
-        daemon = self.app.daemon  # type: ignore
+        daemon = cast("LlmPortApp", self.app).daemon
         status = await daemon.async_get_status()
         if not status.get("running"):
             self.query_one("#stats-content", Static).update("[dim]网关未运行[/]")

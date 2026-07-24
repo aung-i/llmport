@@ -6,6 +6,8 @@ try:
 except Exception:
     __version__ = "unknown"
 
+from typing import cast
+
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static, Footer, TabbedContent, TabPane
@@ -214,7 +216,7 @@ class LlmPortApp(App):
 
     def __init__(self):
         super().__init__()
-        self.daemon = DaemonManager()
+        self.daemon: DaemonManager = DaemonManager()
 
     async def on_mount(self) -> None:
         """On mount: check for first-run, push onboarding if needed.

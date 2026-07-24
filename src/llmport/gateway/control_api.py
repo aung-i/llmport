@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from llmport.models.provider import ProviderConfig
 from llmport.models.model import merge_aliases_into_logical_models
 from llmport.gateway.state import get_state
+from llmport.gateway.ip_utils import validate_public_url
 from llmport.gateway import openai_handler, anthropic_handler
 
 # ---------------------------------------------------------------------------
@@ -93,11 +94,21 @@ async def control_providers(request: Request) -> JSONResponse:
         ])
     elif request.method == "POST":
         body = await request.json()
-        # Issue #6: Protect existing API key when the UI sends "***"
-        if body.get("api_key") == "***":
+        # Issue #1: SSRF — validate base_url
+        if not validate_public_url(body.get("base_url", "")):
+            return JSONResponse(
+                {"ok": False, "error": "不允许使用内网/本地地址"},
+                status_code=400,
+            )
+        # Issue #4: Protect existing API key when the UI sends "***"
+        raw_key = body.get("api_key")
+        if raw_key == "***":
             existing = {p.id: p for p in state.providers}
             if body["id"] in existing:
                 body["api_key"] = existing[body["id"]].api_key
+        elif raw_key == "":
+            # Empty string means "clear the key"
+            body["api_key"] = ""
         provider = ProviderConfig.from_dict(body)
         existing = [p for p in state.providers if p.id != provider.id]
         existing.append(provider)

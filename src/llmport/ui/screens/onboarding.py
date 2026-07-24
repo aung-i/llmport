@@ -1,25 +1,17 @@
 """First-run onboarding wizard — 3-step setup flow."""
 
-import httpx
+from typing import TYPE_CHECKING, cast
 
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Container, Horizontal
 from textual.widgets import Static, Button
 
 from llmport.config.store import ConfigStore
+from llmport.ui import async_get_json
 
-
-async def async_get_json(url: str) -> dict | list | None:
-    """Helper to fetch JSON from the control API."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
-    return None
+if TYPE_CHECKING:
+    from llmport.app import LlmPortApp
 
 
 class OnboardingScreen(ModalScreen):
@@ -82,7 +74,8 @@ class OnboardingScreen(ModalScreen):
             store.init_first_run()
 
             # Start the daemon so the ProviderFormScreen can make API calls
-            daemon = self.app.daemon  # type: ignore
+            _app = cast("LlmPortApp", self.app)
+            daemon = _app.daemon
             if not daemon.is_running():
                 daemon.start()
                 import asyncio
@@ -92,8 +85,8 @@ class OnboardingScreen(ModalScreen):
             # Import lazily to avoid circular dependency
             from llmport.ui.screens.providers import ProviderFormScreen
 
-            self.app.notify("配置已初始化，请添加你的第一个 Provider", title="第一步")  # type: ignore
-            await self.app.push_screen(  # type: ignore
+            _app.notify("配置已初始化，请添加你的第一个 Provider", title="第一步")
+            await _app.push_screen(
                 ProviderFormScreen(daemon),
                 self._on_provider_done,
             )
