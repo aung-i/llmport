@@ -1,5 +1,6 @@
 """Gateway HTTP server with OpenAI and Anthropic protocol endpoints."""
 
+import json as _json
 import time
 
 from starlette.applications import Starlette
@@ -8,7 +9,7 @@ from starlette.responses import JSONResponse, StreamingResponse, Response
 from starlette.routing import Route
 
 from llmport.config.store import ConfigStore
-from llmport.models.provider import ProviderConfig, ProviderHealth
+from llmport.models.provider import ProviderConfig
 from llmport.models.model import merge_aliases_into_logical_models
 from llmport.gateway.router import Router, RouterError
 from llmport.gateway import openai_handler, anthropic_handler
@@ -25,6 +26,94 @@ def _migrate_gateway_config(data: dict) -> dict:
         gw = {"host": "127.0.0.1", "port": gw.get("openai_port", 11434)}
         data["gateway"] = gw
     return {"host": gw["host"], "port": gw.get("port", 11434)}
+
+
+def _safe_token_val(val) -> int:
+    """Return max(0, int(val)) handling non-int/negative values gracefully."""
+    if isinstance(val, int) and val >= 0:
+        return val
+    if isinstance(val, (float, str)):
+        try:
+            return max(0, int(float(val)))
+        except (ValueError, TypeError):
+            pass
+    return 0
+
+
+def _extract_tokens(result: dict) -> int:
+    """Extract total token count from a non-streaming response dict.
+
+    Supports both OpenAI (``usage.total_tokens``) and Anthropic
+    (``usage.input_tokens + usage.output_tokens``) formats.
+    Returns 0 when no usage is present.
+    """
+    usage = result.get("usage") or {}
+    # OpenAI format
+    val = usage.get("total_tokens")
+    if val is not None:
+        return _safe_token_val(val)
+    # Anthropic format
+    total = 0
+    for key in ("input_tokens", "output_tokens"):
+        val = usage.get(key)
+        if val is not None:
+            total += _safe_token_val(val)
+    return total
+
+
+def _parse_usage_from_sse(chunk: bytes) -> int | None:
+    """Parse usage from a single SSE chunk (OpenAI or Anthropic format).
+
+    Returns total_tokens or None if the chunk contains no usage info.
+    """
+    if not chunk:
+        return None
+    try:
+        text = chunk.decode("utf-8", errors="replace")
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload in ("[DONE]",):
+                continue
+            obj = _json.loads(payload)
+            usage = obj.get("usage")
+            if usage is None:
+                # Anthropic message_start nests usage under "message"
+                msg = obj.get("message")
+                if isinstance(msg, dict):
+                    usage = msg.get("usage")
+            if not usage:
+                continue
+            # OpenAI: usage.total_tokens
+            total = _safe_token_val(usage.get("total_tokens"))
+            if total:
+                return total
+            # Anthropic: usage.input_tokens + usage.output_tokens
+            inp = _safe_token_val(usage.get("input_tokens"))
+            out = _safe_token_val(usage.get("output_tokens"))
+            if inp or out:
+                return inp + out
+    except Exception:
+        pass
+    return None
+
+
+async def _tracked_stream(generator, state):
+    """Wrap an async SSE generator to track usage and request count.
+
+    Passes through all chunks and, after the stream completes, increments
+    *request_count* and accumulates *total_tokens* from any SSE usage fields.
+    """
+    try:
+        async for chunk in generator:
+            yield chunk
+            usage = _parse_usage_from_sse(chunk)
+            if usage is not None:
+                state.total_tokens += usage
+    finally:
+        state.request_count += 1
 
 
 class GatewayState:
@@ -113,42 +202,64 @@ async def openai_chat(request: Request) -> Response:
 
     if is_stream:
         async def generate():
-            primary = openai_handler.stream(body, provider, model_name)
-            try:
-                first_chunk = await primary.__anext__()
-            except StopAsyncIteration:
-                return
+            last_id = provider.id
+            cur_provider = provider
+            cur_model = model_name
 
-            if b"[ERROR]" in first_chunk:
-                await primary.aclose()
-                fallback = router.try_fallback(provider.id)
-                if fallback:
-                    fb_provider, fb_model = fallback
-                    if fb_provider.protocol == "openai":
-                        async for fb_chunk in openai_handler.stream(
-                            body, fb_provider, fb_model
-                        ):
-                            yield fb_chunk
+            while True:
+                gen = openai_handler.stream(body, cur_provider, cur_model)
+                try:
+                    first_chunk = await gen.__anext__()
+                except StopAsyncIteration:
+                    return
+
+                if b"[ERROR]" not in first_chunk:
+                    yield first_chunk
+                    async for chunk in gen:
+                        yield chunk
+                    return
+
+                await gen.aclose()
+
+                # Find next fallback with matching protocol
+                while True:
+                    fb = router.try_fallback(last_id)
+                    if not fb:
+                        yield first_chunk  # all exhausted
                         return
-                yield first_chunk
-                return
+                    fb_provider, fb_model = fb
+                    last_id = fb_provider.id
+                    if fb_provider.protocol == "openai":
+                        cur_provider = fb_provider
+                        cur_model = fb_model
+                        break
+                # Continue outer loop with new provider
 
-            yield first_chunk
-            async for chunk in primary:
-                yield chunk
-
-        return StreamingResponse(generate(), media_type="text/event-stream")
+        return StreamingResponse(
+            _tracked_stream(generate(), state),
+            media_type="text/event-stream",
+        )
     else:
         result, error = await openai_handler.forward(body, provider, model_name)
         if error:
-            fallback = router.try_fallback(provider.id)
-            if fallback:
-                fb_provider, fb_model = fallback
-                if fb_provider.protocol == "openai":
-                    result, error = await openai_handler.forward(body, fb_provider, fb_model)
+            last_id = provider.id
+            while True:
+                fb = router.try_fallback(last_id)
+                if not fb:
+                    break
+                fb_provider, fb_model = fb
+                if fb_provider.protocol != "openai":
+                    last_id = fb_provider.id
+                    continue
+                result, error = await openai_handler.forward(body, fb_provider, fb_model)
+                if not error:
+                    break
+                last_id = fb_provider.id
+
+        state.request_count += 1
         if error:
             return JSONResponse({"error": error}, status_code=502)
-        state.request_count += 1
+        state.total_tokens += _extract_tokens(result)
         return JSONResponse(result)
 
 
@@ -165,7 +276,15 @@ async def openai_models(request: Request) -> Response:
 
 
 async def openai_catchall(request: Request) -> Response:
-    """Forward any other OpenAI endpoint transparently."""
+    """Forward any other OpenAI endpoint transparently.
+
+    Note: this is a generic passthrough for arbitrary endpoints
+    (e.g. ``/v1/embeddings``, ``/v1/audio/transcriptions``).  It
+    intentionally has **no fallback logic** and **no stats tracking**
+    because the upstream protocol/response format is unknown at this
+    level.  Protocol-specific endpoints (``/v1/chat/completions``)
+    with full fallback + stats are handled by ``openai_chat``.
+    """
     state = _get_state()
     router = state.get_router()
     try:
@@ -212,44 +331,64 @@ async def anthropic_messages(request: Request) -> Response:
 
     if is_stream:
         async def generate():
-            primary = anthropic_handler.stream(body, provider, model_name)
-            try:
-                first_chunk = await primary.__anext__()
-            except StopAsyncIteration:
-                return
+            last_id = provider.id
+            cur_provider = provider
+            cur_model = model_name
 
-            if b"[ERROR]" in first_chunk:
-                await primary.aclose()
-                fallback = router.try_fallback(provider.id)
-                if fallback:
-                    fb_provider, fb_model = fallback
-                    if fb_provider.protocol == "anthropic":
-                        async for fb_chunk in anthropic_handler.stream(
-                            body, fb_provider, fb_model
-                        ):
-                            yield fb_chunk
+            while True:
+                gen = anthropic_handler.stream(body, cur_provider, cur_model)
+                try:
+                    first_chunk = await gen.__anext__()
+                except StopAsyncIteration:
+                    return
+
+                if b"[ERROR]" not in first_chunk:
+                    yield first_chunk
+                    async for chunk in gen:
+                        yield chunk
+                    return
+
+                await gen.aclose()
+
+                # Find next fallback with matching protocol
+                while True:
+                    fb = router.try_fallback(last_id)
+                    if not fb:
+                        yield first_chunk  # all exhausted
                         return
-                yield first_chunk
-                return
+                    fb_provider, fb_model = fb
+                    last_id = fb_provider.id
+                    if fb_provider.protocol == "anthropic":
+                        cur_provider = fb_provider
+                        cur_model = fb_model
+                        break
+                # Continue outer loop with new provider
 
-            yield first_chunk
-            async for chunk in primary:
-                yield chunk
-
-        return StreamingResponse(generate(), media_type="text/event-stream")
+        return StreamingResponse(
+            _tracked_stream(generate(), state),
+            media_type="text/event-stream",
+        )
     else:
         result, error = await anthropic_handler.forward(body, provider, model_name)
         if error:
-            fallback = router.try_fallback(provider.id)
-            if fallback:
-                fb_provider, fb_model = fallback
-                if fb_provider.protocol == "anthropic":
-                    result, error = await anthropic_handler.forward(
-                        body, fb_provider, fb_model
-                    )
+            last_id = provider.id
+            while True:
+                fb = router.try_fallback(last_id)
+                if not fb:
+                    break
+                fb_provider, fb_model = fb
+                if fb_provider.protocol != "anthropic":
+                    last_id = fb_provider.id
+                    continue
+                result, error = await anthropic_handler.forward(body, fb_provider, fb_model)
+                if not error:
+                    break
+                last_id = fb_provider.id
+
+        state.request_count += 1
         if error:
             return JSONResponse({"error": error}, status_code=502)
-        state.request_count += 1
+        state.total_tokens += _extract_tokens(result)
         return JSONResponse(result)
 
 
@@ -261,6 +400,7 @@ async def control_status(request: Request) -> JSONResponse:
         "active_model": state.active_model_id,
         "uptime": time.time() - state.started_at,
         "request_count": state.request_count,
+        "total_tokens": state.total_tokens,
         "provider_count": len(state.providers),
         "model_count": len(state.models),
         "providers": [
@@ -351,9 +491,6 @@ async def control_fetch_models(request: Request) -> JSONResponse:
     return JSONResponse({"models": models, "error": error})
 
 
-ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
-
-
 async def control_gateway_config(request: Request) -> JSONResponse:
     """Get or update gateway configuration."""
     state = _get_state()
@@ -364,10 +501,10 @@ async def control_gateway_config(request: Request) -> JSONResponse:
         host = body.get("host", "127.0.0.1").strip()
         port = int(body.get("port", 11434))
 
-        # Reject dangerous bind addresses — the gateway should only listen locally
-        if host not in ALLOWED_HOSTS:
+        # Validate host is non-empty and reasonable length
+        if not host or len(host) > 253:
             return JSONResponse(
-                {"ok": False, "error": f"不允许的主机地址: {host}。仅允许: {', '.join(sorted(ALLOWED_HOSTS))}"},
+                {"ok": False, "error": f"无效的主机地址: {host}"},
                 status_code=400,
             )
 
@@ -379,7 +516,13 @@ async def control_gateway_config(request: Request) -> JSONResponse:
 
         state.gateway = {"host": host, "port": port}
         state.save()
-        return JSONResponse({"ok": True, "gateway": state.gateway})
+
+        # Warn if binding to a non-loopback address (gateway will be network-accessible)
+        warning = None
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            warning = f"网关绑定到 {host}，局域网内其他设备可访问你的 API key"
+
+        return JSONResponse({"ok": True, "gateway": state.gateway, "warning": warning})
 
 
 async def control_daemon_stop(request: Request) -> JSONResponse:
@@ -395,19 +538,27 @@ async def control_daemon_restart(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "action": "restart"})
 
 
-def create_app(store: ConfigStore) -> Starlette:
-    """Create the full gateway application (endpoints + control API)."""
+def create_app(store: ConfigStore) -> tuple[Starlette, Starlette]:
+    """Create the gateway and control applications.
+
+    Returns a ``(gateway_app, control_app)`` tuple:
+
+    - **gateway_app** — OpenAI and Anthropic protocol endpoints only.
+    - **control_app** — Control API endpoints (``/api/*``) only.
+    """
     global STATE
     STATE = GatewayState(store)
 
-    routes = [
+    gateway_routes = [
         # OpenAI protocol
         Route("/openai/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/openai/v1/models", openai_models, methods=["GET"]),
         Route("/openai/v1/{path:path}", openai_catchall, methods=["POST", "GET"]),
         # Anthropic protocol
         Route("/anthropic/v1/messages", anthropic_messages, methods=["POST"]),
-        # Control API
+    ]
+
+    control_routes = [
         Route("/api/status", control_status, methods=["GET"]),
         Route("/api/models/switch", control_switch_model, methods=["POST"]),
         Route("/api/providers", control_providers, methods=["GET", "POST", "DELETE"]),
@@ -418,32 +569,29 @@ def create_app(store: ConfigStore) -> Starlette:
         Route("/api/daemon/restart", control_daemon_restart, methods=["POST"]),
     ]
 
-    return Starlette(routes=routes)
+    return Starlette(routes=gateway_routes), Starlette(routes=control_routes)
 
 
 def run_daemon(store: ConfigStore) -> None:
     """Start the gateway daemon on the configured host:port (default 127.0.0.1:11434)
     and the control port from LLMGATE_CONTROL_PORT.
 
-    All protocols (OpenAI, Anthropic) share the same port; they are
-    differentiated by URL path (/v1/chat/completions vs /v1/messages).
+    Gateway and control APIs run as separate Starlette applications on separate
+    ports.  The gateway app serves OpenAI/Anthropic protocol endpoints; the
+    control app serves ``/api/*`` endpoints.
     """
     import os
     import threading
     import uvicorn
 
-    app = create_app(store)
+    gateway_app, control_app = create_app(store)
     control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
 
     gw = _migrate_gateway_config(store.load())
     host = gw["host"]
     gateway_port = gw["port"]
 
-    ports = [gateway_port]
-    if control_port:
-        ports.append(control_port)
-
-    def _serve(port: int) -> None:
+    def _serve(app, port: int) -> None:
         config = uvicorn.Config(
             app,
             host=host,
@@ -452,18 +600,14 @@ def run_daemon(store: ConfigStore) -> None:
         )
         uvicorn.Server(config).run()
 
-    # Start gateway port in a daemon thread
-    threads = []
-    for port in ports:
-        if port == control_port:
-            continue  # control port runs in main thread
-        t = threading.Thread(target=_serve, args=(port,), daemon=True)
-        t.start()
-        threads.append(t)
+    # Start gateway on gateway port in a daemon thread
+    t = threading.Thread(
+        target=_serve, args=(gateway_app, gateway_port), daemon=True
+    )
+    t.start()
 
     # Control port runs in the main thread (handles signals for graceful stop)
     if control_port:
-        _serve(control_port)
-    elif threads:
-        # If no control port, block on the gateway thread
-        threads[0].join()
+        _serve(control_app, control_port)
+    else:
+        t.join()

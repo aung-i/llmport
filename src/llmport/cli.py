@@ -1,6 +1,5 @@
 """CLI entry point for llmport."""
 
-import sys
 import argparse
 import json
 import urllib.request

@@ -22,7 +22,10 @@ def test_create_app_returns_starlette():
         })
         data["active_model"] = "gpt5"
         store.save(data)
-        app = create_app(store)
-        assert app is not None
-        # Should have routes
-        assert len(app.routes) >= 4
+        gateway_app, control_app = create_app(store)
+        assert gateway_app is not None
+        assert control_app is not None
+        # Gateway should have 4 routes (chat, models, catchall, messages)
+        assert len(gateway_app.routes) == 4
+        # Control should have 8 routes
+        assert len(control_app.routes) == 8

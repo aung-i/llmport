@@ -1,8 +1,5 @@
 """Main Textual application for llmport."""
 
-import os
-from pathlib import Path
-
 try:
     import importlib.metadata as _metadata
     __version__ = _metadata.version("llmport")
@@ -219,14 +216,29 @@ class LlmPortApp(App):
         super().__init__()
         self.daemon = DaemonManager()
 
-    def on_mount(self) -> None:
-        # Check if first run
-        config_dir = os.environ.get(
-            "XDG_CONFIG_HOME",
-            os.path.join(Path.home(), ".config"),
-        )
-        key_path = Path(config_dir) / "llmport" / "key"
-        if not key_path.exists():
+    async def on_mount(self) -> None:
+        # Auto-start daemon if not running (design spec: TUI-first, gateway-second)
+        if not self.daemon.is_running():
+            self.daemon.start()
+            # Give daemon a moment to initialize
+            import asyncio
+            await asyncio.sleep(1.0)
+
+        # Refresh all panes now that daemon is ready
+        # (panes mounted before daemon started, need explicit refresh)
+        try:
+            await self.query_one(ModelsPane).refresh_models()
+        except Exception:
+            pass
+
+        # Check if first run: no providers configured
+        from llmport.config.store import ConfigStore
+        store = ConfigStore()
+        try:
+            data = store.load()
+            if not data.get("providers"):
+                self.push_screen(OnboardingScreen())
+        except Exception:
             self.push_screen(OnboardingScreen())
 
     def compose(self) -> ComposeResult:
@@ -234,12 +246,12 @@ class LlmPortApp(App):
             yield Static("llmport", classes="")
             yield Static(f"v{__version__}", classes="version")
         with TabbedContent():
-            with TabPane("⚙ 网关", id="gateway"):
-                yield GatewayPane()
             with TabPane("\U0001f916 模型", id="models"):
                 yield ModelsPane()
-            with TabPane("\U0001f310  供应商", id="providers"):
+            with TabPane("\U0001f310 供应商", id="providers"):
                 yield ProvidersPane()
+            with TabPane("⚙ 网关", id="gateway"):
+                yield GatewayPane()
             with TabPane("\U0001f4ca 统计", id="stats"):
                 yield StatsPane()
             with TabPane("\U0001f527 设置", id="settings"):

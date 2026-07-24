@@ -56,15 +56,20 @@ class ModelDetailScreen(ModalScreen):
             self.dismiss()
         elif event.button.id == "set-active":
             port = self.daemon.get_control_port()
-            if port:
-                import httpx
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(
-                        f"http://127.0.0.1:{port}/api/models/switch",
-                        json={"model_id": self.model["id"]},
-                    )
-                self.notify(f"已切换到: {self.model['id']}", title="模型切换")
-                self.dismiss()
+            if port is None:
+                self.notify("网关未运行", title="模型切换", severity="error")
+                return
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/models/switch",
+                    json={"model_id": self.model["id"]},
+                )
+                if resp.status_code != 200:
+                    self.notify(f"切换失败", title="模型切换", severity="error")
+                    return
+            self.notify(f"已切换到: {self.model['id']}", title="模型切换")
+            self.dismiss()
 
 
 class ModelsPane(Vertical):
@@ -86,6 +91,7 @@ class ModelsPane(Vertical):
             yield Button(" 添加模型", id="btn-add", variant="primary")
 
     async def on_mount(self) -> None:
+        self.set_interval(5.0, self.refresh_models)
         await self.refresh_models()
 
     async def refresh_models(self) -> None:
@@ -180,12 +186,17 @@ class ModelsPane(Vertical):
             model_id = self._filtered_models[list_view.index]["id"]
             daemon = self.app.daemon  # type: ignore
             port = daemon.get_control_port()
-            if port:
-                import httpx
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(
-                        f"http://127.0.0.1:{port}/api/models/switch",
-                        json={"model_id": model_id},
-                    )
-                await self.refresh_models()
-                self.notify(f"已切换到: {model_id}", title="模型切换")
+            if port is None:
+                self.notify("网关未运行", title="模型切换", severity="error")
+                return
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/models/switch",
+                    json={"model_id": model_id},
+                )
+                if resp.status_code != 200:
+                    self.notify("切换失败", title="模型切换", severity="error")
+                    return
+            await self.refresh_models()
+            self.notify(f"已切换到: {model_id}", title="模型切换")

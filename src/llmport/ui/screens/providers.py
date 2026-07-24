@@ -69,7 +69,7 @@ class ProviderFormScreen(ModalScreen):
             yield Label("[dim]协议[/]")
             current = self.provider.get("protocol", "openai") if self.provider else "openai"
             yield Select(
-                [(p, p.title()) for p in ["openai", "anthropic"]],
+                [(p.title(), p) for p in ["openai", "anthropic"]],
                 value=current,
                 id="select-protocol",
             )
@@ -104,6 +104,11 @@ class ProviderFormScreen(ModalScreen):
         protocol = self.query_one("#select-protocol", Select).value
         models_raw = self.query_one("#input-models", Input).value
 
+        port = self.daemon.get_control_port()
+        if port is None:
+            self.notify("网关未运行，请先启动网关", title="错误", severity="error")
+            return
+
         if event.button.id == "btn-test":
             models = _parse_models(models_raw)
             body = {
@@ -114,44 +119,40 @@ class ProviderFormScreen(ModalScreen):
                 "api_key": key,
                 "models": [{"name": m["name"], "aliases": m["aliases"]} for m in models],
             }
-            port = self.daemon.get_control_port()
-            if port:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"http://127.0.0.1:{port}/api/providers/test",
-                        json=body,
-                    )
-                    result = resp.json()
-                    if result.get("ok"):
-                        self.notify(f"连接成功 · {result.get('latency_ms', 0):.0f}ms", title="测试结果")
-                    else:
-                        self.notify(f"失败: {result.get('error', '未知')}", title="测试结果", severity="error")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/providers/test",
+                    json=body,
+                )
+                result = resp.json()
+                if result.get("ok"):
+                    self.notify(f"连接成功 · {result.get('latency_ms', 0):.0f}ms", title="测试结果")
+                else:
+                    self.notify(f"失败: {result.get('error', '未知')}", title="测试结果", severity="error")
             return
 
         if event.button.id == "btn-fetch":
-            port = self.daemon.get_control_port()
-            if port:
-                provider_id = name.lower().replace(" ", "-")
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"http://127.0.0.1:{port}/api/providers/models",
-                        json={
-                            "id": provider_id,
-                            "name": name,
-                            "protocol": protocol,
-                            "base_url": url,
-                            "api_key": key,
-                            "models": [],
-                        },
-                    )
-                    result = resp.json()
-                    models_data = result.get("models")
-                    if models_data:
-                        names = [m.get("id", "") for m in models_data]
-                        self.query_one("#input-models", Input).value = "\n".join(names[:50])
-                        self.notify(f"找到 {len(models_data)} 个模型", title="模型列表")
-                    else:
-                        self.notify(f"获取失败: {result.get('error', '')}", title="模型列表", severity="error")
+            provider_id = name.lower().replace(" ", "-")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/providers/models",
+                    json={
+                        "id": provider_id,
+                        "name": name,
+                        "protocol": protocol,
+                        "base_url": url,
+                        "api_key": key,
+                        "models": [],
+                    },
+                )
+                result = resp.json()
+                models_data = result.get("models")
+                if models_data:
+                    names = [m.get("id", "") for m in models_data]
+                    self.query_one("#input-models", Input).value = "\n".join(names[:50])
+                    self.notify(f"找到 {len(models_data)} 个模型", title="模型列表")
+                else:
+                    self.notify(f"获取失败: {result.get('error', '')}", title="模型列表", severity="error")
             return
 
         if event.button.id == "btn-save":
@@ -164,16 +165,17 @@ class ProviderFormScreen(ModalScreen):
                 "api_key": key,
                 "models": [{"name": m["name"], "aliases": m["aliases"]} for m in models],
             }
-            port = self.daemon.get_control_port()
-            if port:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    await client.post(
-                        f"http://127.0.0.1:{port}/api/providers",
-                        json=body,
-                    )
-                self.notify(f"已保存: {name}", title="供应商")
-                self.dismiss()
-                await self.app.query_one(ProvidersPane).refresh_providers()  # type: ignore
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/providers",
+                    json=body,
+                )
+                if resp.status_code != 200:
+                    self.notify(f"保存失败: {resp.text}", title="供应商", severity="error")
+                    return
+            self.notify(f"已保存: {name}", title="供应商")
+            self.dismiss()
+            await self.app.query_one(ProvidersPane).refresh_providers()  # type: ignore
 
 
 def _parse_models(raw: str) -> list[dict]:
@@ -203,12 +205,16 @@ class ProvidersPane(Vertical):
             yield Button(" 删除供应商", id="btn-delete-provider", variant="error")
 
     async def on_mount(self) -> None:
+        self.set_interval(10.0, self.refresh_providers)
         await self.refresh_providers()
 
     async def refresh_providers(self) -> None:
         daemon = self.app.daemon  # type: ignore
         port = daemon.get_control_port()
         if port is None:
+            list_view = self.query_one("#provider-list", ListView)
+            await list_view.clear()
+            list_view.append(ListItem(Label("[dim]网关未运行，请先在网关页启动[/]")))
             return
         providers = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
         self.providers = providers
@@ -236,17 +242,19 @@ class ProvidersPane(Vertical):
                 provider = self.providers[list_view.index]
                 daemon = self.app.daemon  # type: ignore
                 port = daemon.get_control_port()
-                if port:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.delete(
-                            f"http://127.0.0.1:{port}/api/providers",
-                            json={"id": provider["id"]},
-                        )
-                        if resp.status_code == 200:
-                            self.notify(f"已删除: {provider['name']}", title="供应商")
-                        else:
-                            self.notify(f"删除失败", title="供应商", severity="error")
-                    await self.refresh_providers()
+                if port is None:
+                    self.notify("网关未运行，无法删除", title="供应商", severity="error")
+                    return
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.delete(
+                        f"http://127.0.0.1:{port}/api/providers",
+                        json={"id": provider["id"]},
+                    )
+                    if resp.status_code == 200:
+                        self.notify(f"已删除: {provider['name']}", title="供应商")
+                    else:
+                        self.notify(f"删除失败", title="供应商", severity="error")
+                await self.refresh_providers()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.item is None:

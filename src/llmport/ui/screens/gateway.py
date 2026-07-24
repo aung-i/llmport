@@ -2,7 +2,7 @@
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
-from textual.widgets import Static, Button, Input, Label, Select
+from textual.widgets import Static, Button, Input, Label
 from textual.screen import ModalScreen
 
 from llmport.ui.widgets import Card, Section
@@ -39,10 +39,10 @@ class GatewayConfigScreen(ModalScreen):
             yield Static("[dim]修改后自动重启[/]")
             yield Label("")
             yield Label("[dim]Host[/]")
-            yield Select(
-                [("127.0.0.1", "127.0.0.1"), ("localhost", "localhost"), ("::1", "::1")],
+            yield Input(
                 value=str(self.config.get("host", "127.0.0.1")),
-                id="select-host",
+                placeholder="127.0.0.1",
+                id="input-host",
             )
             yield Label("[dim]Port[/]")
             yield Input(
@@ -64,18 +64,32 @@ class GatewayConfigScreen(ModalScreen):
             import httpx
             daemon = self.app.daemon  # type: ignore
             port = daemon.get_control_port()
-            if port:
-                new_host = self.query_one("#select-host", Select).value
-                new_port = int(self.query_one("#input-port", Input).value.strip())
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(
-                        f"http://127.0.0.1:{port}/api/gateway/config",
-                        json={"host": new_host, "port": new_port},
-                    )
-                daemon.restart()
-                self.notify(f"地址已更新: {new_host}:{new_port}", title="网关配置")
-                self.dismiss()
-                await self.app.query_one(GatewayPane).refresh_status()  # type: ignore
+            if port is None:
+                self.notify("网关未运行，无法保存配置", title="网关配置", severity="error")
+                return
+            new_host = self.query_one("#input-host", Input).value.strip()
+            port_str = self.query_one("#input-port", Input).value.strip()
+            try:
+                new_port = int(port_str)
+            except ValueError:
+                self.notify("端口号必须是数字", title="网关配置", severity="error")
+                return
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/gateway/config",
+                    json={"host": new_host, "port": new_port},
+                )
+                result = resp.json()
+                if not result.get("ok"):
+                    self.notify(f"失败: {result.get('error', '')}", title="网关配置", severity="error")
+                    return
+                if result.get("warning"):
+                    self.notify(f"地址已更新: {new_host}:{new_port}\n[warning]{result['warning']}[/]", title="网关配置")
+                else:
+                    self.notify(f"地址已更新: {new_host}:{new_port}", title="网关配置")
+            daemon.restart()
+            self.dismiss()
+            await self.app.query_one(GatewayPane).refresh_status()  # type: ignore
 
 
 class GatewayPane(Vertical):

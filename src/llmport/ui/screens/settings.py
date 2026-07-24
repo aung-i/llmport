@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.widgets import Static, Button
 
-from llmport.ui.widgets import Card, Section
+from llmport.ui.widgets import Section
 
 
 class SettingsPane(Vertical):

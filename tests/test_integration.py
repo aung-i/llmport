@@ -25,22 +25,24 @@ def test_full_flow():
         data["active_model"] = "test"
         store.save(data)
 
-        # Create app
-        app = create_app(store)
-        client = TestClient(app)
+        # Create apps
+        gateway_app, control_app = create_app(store)
+        control = TestClient(control_app)
+        gateway = TestClient(gateway_app)
 
-        # Check status
-        resp = client.get("/api/status")
+        # Check status via control API
+        resp = control.get("/api/status")
         assert resp.status_code == 200
         status = resp.json()
         assert status["active_model"] == "test"
+        assert "total_tokens" in status
 
-        # Switch model
-        resp = client.post("/api/models/switch", json={"model_id": "test"})
+        # Switch model via control API
+        resp = control.post("/api/models/switch", json={"model_id": "test"})
         assert resp.status_code == 200
 
-        # Models endpoint returns model list
-        resp = client.get("/openai/v1/models")
+        # Models endpoint via gateway
+        resp = gateway.get("/openai/v1/models")
         assert resp.status_code == 200
         models = resp.json()
         assert len(models["data"]) >= 1
@@ -51,8 +53,8 @@ def test_control_api_providers():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
 
         # List providers (empty)
         resp = client.get("/api/providers")
@@ -93,8 +95,8 @@ def test_protocol_mismatch_error():
         })
         data["active_model"] = "claude"
         store.save(data)
-        app = create_app(store)
-        client = TestClient(app)
+        gateway_app, control_app = create_app(store)
+        client = TestClient(gateway_app)
 
         resp = client.post("/openai/v1/chat/completions", json={
             "model": "claude",
@@ -109,8 +111,8 @@ def test_gateway_config():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
 
         # GET default config
         resp = client.get("/api/gateway/config")
@@ -128,6 +130,7 @@ def test_gateway_config():
         assert resp.json()["ok"] is True
         assert resp.json()["gateway"]["host"] == "localhost"
         assert resp.json()["gateway"]["port"] == 9999
+        assert resp.json().get("warning") is None  # loopback → no warning
 
         # GET confirm persistence
         resp = client.get("/api/gateway/config")
@@ -135,13 +138,13 @@ def test_gateway_config():
         assert resp.json()["host"] == "localhost"
         assert resp.json()["port"] == 9999
 
-        # POST with dangerous host is rejected
+        # POST with empty host is rejected
         resp = client.post("/api/gateway/config", json={
-            "host": "0.0.0.0",
+            "host": "",
             "port": 11434,
         })
         assert resp.status_code == 400
-        assert "不允许的主机地址" in resp.json()["error"]
+        assert "无效的主机地址" in resp.json()["error"]
 
         # POST with invalid port is rejected
         resp = client.post("/api/gateway/config", json={
@@ -173,8 +176,8 @@ def test_provider_delete():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
 
         # Add a provider
         client.post("/api/providers", json={
@@ -205,10 +208,147 @@ def test_daemon_restart_endpoint():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
 
         resp = client.post("/api/daemon/restart")
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         assert resp.json()["action"] == "restart"
+
+
+def test_gateway_config_accepts_any_valid_host():
+    """POST /api/gateway/config with 0.0.0.0 is accepted with warning."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
+
+        resp = client.post("/api/gateway/config", json={
+            "host": "0.0.0.0",
+            "port": 11434,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["gateway"]["host"] == "0.0.0.0"
+        assert data.get("warning") is not None  # non-loopback → warning
+
+
+def test_gateway_config_rejects_empty_host():
+    """POST /api/gateway/config with empty host returns 400."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
+
+        resp = client.post("/api/gateway/config", json={
+            "host": "",
+            "port": 11434,
+        })
+        assert resp.status_code == 400
+
+
+def test_control_test_provider_endpoint():
+    """POST /api/providers/test returns ok + latency_ms."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
+
+        resp = client.post("/api/providers/test", json={
+            "id": "test",
+            "name": "Test",
+            "protocol": "openai",
+            "base_url": "https://httpbin.org",
+            "api_key": "sk-test",
+            "models": [],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "ok" in data
+        assert "latency_ms" in data
+
+
+def test_control_fetch_models_endpoint():
+    """POST /api/providers/models returns models list."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        gateway_app, control_app = create_app(store)
+        client = TestClient(control_app)
+
+        resp = client.post("/api/providers/models", json={
+            "id": "test",
+            "name": "Test",
+            "protocol": "openai",
+            "base_url": "https://httpbin.org",
+            "api_key": "sk-test",
+            "models": [],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "models" in data
+
+
+def test_parse_models_utility():
+    """Test _parse_models with various inputs."""
+    from llmport.ui.screens.providers import _parse_models
+
+    # Normal input
+    result = _parse_models("gpt-5,gpt5,chatgpt\nclaude-opus,opus")
+    assert len(result) == 2
+    assert result[0]["name"] == "gpt-5"
+    assert result[0]["aliases"] == ["gpt5", "chatgpt"]
+    assert result[1]["name"] == "claude-opus"
+    assert result[1]["aliases"] == ["opus"]
+
+    # Empty string
+    assert _parse_models("") == []
+
+    # Whitespace only
+    assert _parse_models("  \n  \n") == []
+
+    # Single model no aliases
+    result = _parse_models("gpt-5")
+    assert len(result) == 1
+    assert result[0]["name"] == "gpt-5"
+    assert result[0]["aliases"] == []
+
+
+def test_daemon_manager_pid_file(tmp_path):
+    """DaemonManager.is_running() reflects PID file state."""
+    import json
+    import os
+    from llmport.daemon import DaemonManager
+
+    dm = DaemonManager(str(tmp_path))
+    assert dm.is_running() is False
+
+    # Write a fake PID file with current PID
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.write_text(json.dumps({"pid": os.getpid(), "control_port": 12345}))
+    assert dm.is_running() is True
+
+    # Stale PID file (nonexistent process)
+    pid_path.write_text(json.dumps({"pid": 99999, "control_port": 12345}))
+    assert dm.is_running() is False
+
+
+def test_first_run_detection_with_empty_providers():
+    """When providers list is empty, first-run check should trigger."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        data = store.load()
+        # Fresh config has empty providers — should be detected as first run
+        assert data.get("providers") == []
+
+        # Add a provider and verify detection works
+        data["providers"].append({"id": "test", "name": "Test"})
+        store.save(data)
+        data = store.load()
+        assert len(data["providers"]) == 1

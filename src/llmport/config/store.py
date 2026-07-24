@@ -1,7 +1,6 @@
 """Encrypted YAML config store for ~/.config/llmport/."""
 
 import os
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -51,3 +50,12 @@ class ConfigStore:
         ciphertext = encrypt(key, plaintext)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.config_path.write_bytes(ciphertext)
+        # Secure file and directory permissions (POSIX only)
+        try:
+            self.config_path.chmod(0o600)
+        except (OSError, AttributeError):
+            pass  # non-POSIX platform
+        try:
+            self.dir.chmod(0o700)
+        except (OSError, AttributeError):
+            pass  # non-POSIX platform
