@@ -25,7 +25,7 @@ class OnboardingScreen(ModalScreen):
     CSS = """
     OnboardingScreen {
         align: center middle;
-        background: rgba(15, 17, 25, 0.85);
+        background: $background 85%;
     }
     #onboard-container {
         width: 48;

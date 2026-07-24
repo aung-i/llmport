@@ -26,4 +26,20 @@ packages = ["src/llmport"]
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=6.0.0",
 ]
+
+[tool.coverage.run]
+source = ["src/llmport"]
+branch = true
+omit = ["src/llmport/__main__.py", "src/llmport/cli.py"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_empty = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=src/llmport --cov-report=term-missing --cov-fail-under=85"

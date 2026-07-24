@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, cast
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
-from textual.widgets import Static, ListView, ListItem, Label, Button, Input
+from textual.widgets import Static, ListView, ListItem, Label, Button, Input, LoadingIndicator
 from textual.screen import ModalScreen
 
 from llmport.daemon import DaemonManager
@@ -50,7 +50,7 @@ class ModelDetailScreen(ModalScreen):
         width: 56;
         height: auto;
         min-height: 18;
-        border: thick $primary;
+        border: solid $primary;
         background: $surface;
         padding: 2 3;
     }
@@ -111,9 +111,11 @@ class ModelsPane(Vertical):
         self.active_model: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("[dim]加载中...[/]", id="active-info")
+        yield LoadingIndicator(id="loading-indicator")
+        yield Static(id="active-info")
         yield Input(placeholder="搜索模型...", id="model-search")
         with Section("模型列表"):
+            yield Static(id="empty-state")
             yield ListView(id="model-list")
         with Horizontal(id="model-actions"):
             yield Button(" 模型详情", id="btn-detail", variant="default")
@@ -127,7 +129,15 @@ class ModelsPane(Vertical):
         daemon = cast("LlmPortApp", self.app).daemon
         status = await daemon.async_get_status()
         port = daemon.get_control_port()
+
+        # Always hide loading indicator after refresh completes (success or not)
+        self.query_one("#loading-indicator", LoadingIndicator).visible = False
+
         if port is None:
+            empty = self.query_one("#empty-state", Static)
+            empty.update("网关未运行，请在网关页启动")
+            empty.visible = True
+            self.query_one("#model-list", ListView).visible = False
             return
         data = await async_get_json(f"http://127.0.0.1:{port}/api/status") or {}
         self.active_model = data.get("active_model")
@@ -140,11 +150,22 @@ class ModelsPane(Vertical):
             for m in models_list
         ]
 
+        # Show active-info
+        active_display = self.active_model or "[dim]无[/]"
+        self.query_one("#active-info", Static).update(f"当前活跃: [bold $primary]{active_display}[/]")
+        self.query_one("#active-info", Static).visible = True
+
+        # Toggle list-view / empty-state
+        empty = self.query_one("#empty-state", Static)
         list_view = self.query_one("#model-list", ListView)
         await list_view.clear()
         if not self.models:
-            list_view.append(ListItem(Label("[dim]暂无模型 — 请先在供应商页添加 Provider[/]")))
+            empty.update("暂无模型 — 请先在供应商页添加 Provider")
+            empty.visible = True
+            list_view.visible = False
         else:
+            empty.visible = False
+            list_view.visible = True
             for m in self.models:
                 if m["id"] == self.active_model:
                     text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"
@@ -152,19 +173,26 @@ class ModelsPane(Vertical):
                     text = f"  {m['id']}   [dim]({m['provider_count']} 供应商)[/]"
                 list_view.append(ListItem(Label(text)))
 
-        active_display = self.active_model or "[dim]无[/]"
-        self.query_one("#active-info", Static).update(f"当前活跃: [bold $primary]{active_display}[/]")
         self._filtered_models = list(self.models)
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         """Filter model list by search query."""
         query = event.value.strip().lower()
+        empty = self.query_one("#empty-state", Static)
         list_view = self.query_one("#model-list", ListView)
         await list_view.clear()
         filtered = [m for m in self.models if query in m["id"].lower()] if query else self.models
         if not filtered and query:
-            list_view.append(ListItem(Label("[dim]无匹配模型[/]")))
+            empty.update("无匹配模型")
+            empty.visible = True
+            list_view.visible = False
+        elif not filtered:
+            empty.update("暂无模型 — 请先在供应商页添加 Provider")
+            empty.visible = True
+            list_view.visible = False
         else:
+            empty.visible = False
+            list_view.visible = True
             for m in filtered:
                 if m["id"] == self.active_model:
                     text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"

@@ -485,17 +485,16 @@ class TestMainUIAfterOnboarding:
     async def test_app_title_shown(self, mock_deps):
         """App header shows 'llmport'."""
         from llmport.app import LlmPortApp
+        from textual.widgets import Header
 
         app = LlmPortApp()
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
 
-            header = app.query_one("#app-header")
+            header = app.query_one(Header)
             assert header is not None
 
-            # First child is the title static
-            title_static = app.query_one("#app-header Static")
-            assert "llmport" in str(title_static.render())
+            assert app.TITLE == "llmport"
 
 
 # ===================================================================
@@ -539,15 +538,14 @@ class TestGatewayNotRunningState:
             await pilot.click(f"#{ContentTab.add_prefix('providers')}")
             await pilot.pause()
 
-            # The provider-list should show the "not running" message
+            # The provider-list should be hidden and empty-state shown
             provider_list = app.query_one("#provider-list", ListView)
-            items = list(provider_list.query(ListItem))
-            assert len(items) > 0, "Should have at least one item in provider list"
+            assert provider_list.visible is False
 
-            # Check the first item for "网关未运行" message
-            first_item_text = _plain_text(items[0].query_one(Label))
-            assert "网关未运行" in first_item_text or "请先在网关页启动" in first_item_text, (
-                f"Expected gateway-not-running message, got: {first_item_text!r}"
+            empty_state = app.query_one("#empty-state", Static)
+            content = _plain_text(empty_state)
+            assert "网关未运行" in content or "请先在网关页启动" in content, (
+                f"Expected gateway-not-running message, got: {content!r}"
             )
 
     @pytest.mark.asyncio

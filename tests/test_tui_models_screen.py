@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from textual.app import App, ComposeResult
-from textual.widgets import ListView, ListItem, Label, Input, Static, Button
+from textual.widgets import ListView, ListItem, Label, Input, Static, Button, LoadingIndicator
 
 from llmport.daemon import DaemonManager
 from llmport.ui.screens.models import (
@@ -279,16 +279,23 @@ class TestModelsPane:
     async def test_compose(self, mock_daemon):
         """ModelsPane composes all expected child widgets."""
         app = _PaneHostApp(daemon=mock_daemon)
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(80, 30)) as pilot:
             await pilot.pause()
 
             pane = app.query_one(ModelsPane)
 
-            # active-info (Static) — starts with loading text
-            # when daemon port is None, refresh_models returns early
-            # and does not update the static
+            # loading-indicator (LoadingIndicator) — hidden after refresh_models
+            # completes (daemon port=None causes early return which hides it)
+            loading = pane.query_one("#loading-indicator", LoadingIndicator)
+            assert loading.visible is False
+
+            # active-info (Static) — starts empty
             active_info = pane.query_one("#active-info", Static)
-            assert "加载中" in _plain(active_info)
+            assert active_info is not None
+
+            # empty-state (Static) — present in compose
+            empty_state = pane.query_one("#empty-state", Static)
+            assert empty_state is not None
 
             # model-search (Input)
             search_input = pane.query_one("#model-search", Input)
@@ -365,9 +372,9 @@ class TestModelsPane:
 
     @pytest.mark.asyncio
     async def test_on_input_changed_no_match(self, mock_daemon):
-        """Search with no match shows 'no match' placeholder."""
+        """Search with no match shows empty-state."""
         app = _PaneHostApp(daemon=mock_daemon)
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(80, 30)) as pilot:
             await pilot.pause()
 
             pane = app.query_one(ModelsPane)
@@ -382,10 +389,11 @@ class TestModelsPane:
             search_input.value = "nonexistent"
             await pilot.pause()
 
-            assert len(list_view.children) == 1
-            first_child = list_view.children[0]
-            label = first_child.query_one(Label)
-            assert "无匹配" in _plain(label)
+            # list_view hidden, empty-state shown
+            empty_state = pane.query_one("#empty-state", Static)
+            assert empty_state.visible is True
+            assert list_view.visible is False
+            assert "无匹配" in _plain(empty_state)
 
     # -- on_button_pressed -------------------------------------------------
 
@@ -396,8 +404,11 @@ class TestModelsPane:
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
 
+            pane = app.query_one(ModelsPane)
+            btn_add = pane.query_one("#btn-add", Button)
+
             with patch.object(app, "notify") as mock_notify:
-                await pilot.click("#btn-add")
+                btn_add.action_press()
                 await pilot.pause()
 
                 mock_notify.assert_called_once_with(
@@ -417,8 +428,11 @@ class TestModelsPane:
             list_view = app.query_one("#model-list", ListView)
             assert list_view.index is None
 
+            pane = app.query_one(ModelsPane)
+            btn_detail = pane.query_one("#btn-detail", Button)
+
             # Should not raise
-            await pilot.click("#btn-detail")
+            btn_detail.action_press()
             await pilot.pause()
 
     @pytest.mark.asyncio
@@ -431,7 +445,7 @@ class TestModelsPane:
         )
 
         app = _PaneHostApp(daemon=mock_daemon)
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(80, 30)) as pilot:
             await pilot.pause()
 
             pane = app.query_one(ModelsPane)
@@ -462,7 +476,8 @@ class TestModelsPane:
                     }
                 ]
 
-                await pilot.click("#btn-detail")
+                btn_detail = pane.query_one("#btn-detail", Button)
+                btn_detail.action_press()
                 await pilot.pause()
 
             assert isinstance(app.screen, ModelDetailScreen)
@@ -697,10 +712,11 @@ class TestModelsPane:
                 pane = app.query_one(ModelsPane)
                 list_view = pane.query_one("#model-list", ListView)
 
-                # Should have the empty-state placeholder
-                assert len(list_view.children) == 1
-                empty_label = list_view.children[0].query_one(Label)
-                assert "暂无模型" in _plain(empty_label)
+                # Should show empty-state instead of ListItem in list_view
+                empty_state = pane.query_one("#empty-state", Static)
+                assert empty_state.visible is True
+                assert list_view.visible is False
+                assert "暂无模型" in _plain(empty_state)
 
                 # active-info shows "无" when no active_model key exists
                 active_info = pane.query_one("#active-info", Static)
@@ -731,10 +747,11 @@ class TestModelsPane:
                 pane = app.query_one(ModelsPane)
                 list_view = pane.query_one("#model-list", ListView)
 
-                # Should fall back to empty state
-                assert len(list_view.children) == 1
-                empty_label = list_view.children[0].query_one(Label)
-                assert "暂无模型" in _plain(empty_label)
+                # Should show empty-state
+                empty_state = pane.query_one("#empty-state", Static)
+                assert empty_state.visible is True
+                assert list_view.visible is False
+                assert "暂无模型" in _plain(empty_state)
 
     @pytest.mark.asyncio
     async def test_refresh_models_without_active_model(self):
@@ -782,13 +799,21 @@ class TestModelsPane:
             pane = app.query_one(ModelsPane)
             list_view = pane.query_one("#model-list", ListView)
 
-            # No models added, list should be empty
+            # No models added, list should be empty and hidden
             assert len(list_view.children) == 0
 
-            # active-info still shows "加载中..." because refresh_models
-            # returns early when daemon port is None (no update occurs)
+            # loading-indicator hidden because refresh_models hides it
+            loading = pane.query_one("#loading-indicator", LoadingIndicator)
+            assert loading.visible is False
+
+            # empty-state shows gateway-not-running message
+            empty_state = pane.query_one("#empty-state", Static)
+            assert empty_state.visible is True
+            assert "网关未运行" in _plain(empty_state)
+
+            # active-info stays empty
             active_info = pane.query_one("#active-info", Static)
-            assert "加载中" in _plain(active_info)
+            assert _plain(active_info) == ""
 
     # -- Missing lines 36, 170, 205 ---------------------------------------
 
@@ -817,10 +842,10 @@ class TestModelsPane:
                 pane = app.query_one(ModelsPane)
                 list_view = pane.query_one("#model-list", ListView)
 
-                assert len(list_view.children) == 1
-                assert "暂无模型" in _plain(
-                    list_view.children[0].query_one(Label)
-                )
+                empty_state = pane.query_one("#empty-state", Static)
+                assert empty_state.visible is True
+                assert list_view.visible is False
+                assert "暂无模型" in _plain(empty_state)
 
     @pytest.mark.asyncio
     async def test_on_input_changed_with_active_model(self, mock_daemon):

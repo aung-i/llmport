@@ -28,7 +28,7 @@ class FetchModelsScreen(ModalScreen):
         width: 60;
         height: auto;
         min-height: 18;
-        border: thick $primary;
+        border: solid $primary;
         background: $surface;
         padding: 1 2;
     }
@@ -88,16 +88,13 @@ class ProviderFormScreen(ModalScreen):
         width: 64;
         height: auto;
         min-height: 28;
-        border: thick $primary;
+        border: solid $primary;
         background: $surface;
         padding: 1 2;
     }
-    Input {
-        margin: 1 0;
-        width: 100%;
-    }
-    Select {
-        margin: 1 0;
+    ProviderFormScreen Input,
+    ProviderFormScreen Select {
+        margin: 0 0 1 0;
         width: 100%;
     }
     """
@@ -333,6 +330,7 @@ class ProvidersPane(Vertical):
 
     def compose(self) -> ComposeResult:
         with Section("供应商列表"):
+            yield Static(id="empty-state")
             yield ListView(id="provider-list")
         with Horizontal(id="provider-actions"):
             yield Button(" 添加供应商", id="btn-add-provider", variant="primary")
@@ -345,18 +343,23 @@ class ProvidersPane(Vertical):
     async def refresh_providers(self) -> None:
         daemon = cast("LlmPortApp", self.app).daemon
         port = daemon.get_control_port()
+        empty = self.query_one("#empty-state", Static)
+        list_view = self.query_one("#provider-list", ListView)
         if port is None:
-            list_view = self.query_one("#provider-list", ListView)
-            await list_view.clear()
-            list_view.append(ListItem(Label("[dim]网关未运行，请先在网关页启动[/]")))
+            empty.update("网关未运行，请先在网关页启动")
+            empty.visible = True
+            list_view.visible = False
             return
         providers = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
         self.providers = providers
-        list_view = self.query_one("#provider-list", ListView)
         await list_view.clear()
         if not providers:
-            list_view.append(ListItem(Label("[dim]暂无供应商 — 点击下方按钮添加[/]")))
+            empty.update("暂无供应商 — 点击下方按钮添加")
+            empty.visible = True
+            list_view.visible = False
         else:
+            empty.visible = False
+            list_view.visible = True
             for p in providers:
                 icon = {"up": "🟢", "degraded": "🟡", "down": "🔴"}.get(
                     p.get("health", {}).get("status", "unknown"), "⚪"

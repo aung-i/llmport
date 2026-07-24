@@ -14,10 +14,13 @@ tools: Read, Glob, Grep, Bash
 
 ### 入口 2：开发 → 测试 → 检视全流程通过
 - 逐条核对 designer 的验收标准
+- **确认覆盖率 ≥85%**（运行 `pytest --cov=src/llmport --cov-fail-under=85`），不达标打回 tester
 - 全部通过 → `git add -A && git commit -m "..." && git push`
 - 任一条不通过 → 打回原因明确：
   - spec 问题 → 打回 designer
   - 实现问题 → 打回 developer
+  - 覆盖率不足 → 打回 tester
+  - TUI 颜色对比度 <7:1（自动化检查未通过）→ 打回 designer
 
 ## 规则
 - 你是唯一有权执行 git commit / push 的角色

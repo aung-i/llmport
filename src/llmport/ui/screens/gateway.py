@@ -24,7 +24,7 @@ class GatewayConfigScreen(ModalScreen):
     #gw-config-container {
         width: 40;
         height: auto;
-        border: thick $primary;
+        border: solid $primary;
         background: $surface;
         padding: 2 3;
     }

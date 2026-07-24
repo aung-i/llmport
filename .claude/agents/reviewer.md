@@ -16,8 +16,10 @@ tools: Read, Glob, Grep, Bash(pytest:*)
    - 逻辑是否正确
    - 是否有安全漏洞
    - 是否有冗余或可简化之处
-   - 测试覆盖是否充分
-3. 输出 review 报告
+   - 测试覆盖是否充分（**覆盖率 ≥85%，低于 85% 直接打回**）
+   - **TUI 颜色对比度（自动化）**：读取 CSS 变量，计算所有 `color`/`background` 组合的对比度，≥7:1 通过，<7:1 打回
+3. 运行 `pytest --cov=src/llmport --cov-report=term-missing --cov-fail-under=85` 确认覆盖率
+4. 输出 review 报告
 
 ## 输出格式
 

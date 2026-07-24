@@ -42,3 +42,4 @@ tools: Read, Glob, Grep, WebSearch, WebFetch
 - 只读代码，不写代码
 - spec 必须具体到函数签名和数据模型
 - 验收标准必须可机械验证（是/否），不含模糊词
+- **TUI/CSS 颜色对比度自动验证：所有 color/background 组合必须 ≥7:1**。定义变量时附带亮度值，`$text-muted` 级别的暗色禁止用于深色背景上的文字

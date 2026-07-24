@@ -10,8 +10,8 @@ class Card(Container):
 
     DEFAULT_CSS = """
     Card {
-        border: solid $primary-darken-2;
-        background: $surface;
+        border: solid $border-blurred;
+        background: $boost;
         padding: 1 2;
         margin: 1 0;
     }

@@ -536,6 +536,12 @@ async def test_on_button_pressed_btn_fetch_empty():
                 assert "获取失败" in msg
                 assert mock_notify.call_args[1]["severity"] == "error"
 
+                # Worker-specific assertions: button re-enabled, no modal pushed
+                assert form.query_one("#btn-fetch", Button).disabled is False
+                assert isinstance(pilot.app.screen, ProviderFormScreen), (
+                    "Should remain on ProviderFormScreen when fetch fails"
+                )
+
 
 @pytest.mark.asyncio
 async def test_on_button_pressed_btn_fetch_none_stays_open():
@@ -570,6 +576,10 @@ async def test_on_button_pressed_btn_fetch_none_stays_open():
                 assert form.query_one("#input-models", Input).value == ""
                 mock_notify.assert_called_once()
                 assert "获取失败" in mock_notify.call_args[0][0]
+
+                # Worker-specific assertions: button re-enabled, no modal
+                assert form.query_one("#btn-fetch", Button).disabled is False
+                assert isinstance(pilot.app.screen, ProviderFormScreen)
 
 
 # ===================================================================
@@ -1203,14 +1213,14 @@ async def test_refresh_providers_empty():
             pane = app.query_one(ProvidersPane)
             assert pane.providers == []
 
-            list_view = pane.query_one("#provider-list", ListView)
-            items = list(list_view.query(ListItem))
-            assert len(items) == 1
-
-            empty_label = items[0].query_one(Label)
-            rendered = empty_label.render()
+            empty = pane.query_one("#empty-state", Static)
+            assert empty.visible is True
+            rendered = empty.render()
             rendered_text = rendered.plain if hasattr(rendered, "plain") else str(rendered)
             assert "暂无供应商" in rendered_text
+
+            list_view = pane.query_one("#provider-list", ListView)
+            assert list_view.visible is False
 
 
 @pytest.mark.asyncio
@@ -1232,14 +1242,14 @@ async def test_refresh_providers_none():
             pane = app.query_one(ProvidersPane)
             assert pane.providers == []
 
-            list_view = pane.query_one("#provider-list", ListView)
-            items = list(list_view.query(ListItem))
-            assert len(items) == 1
-
-            label = items[0].query_one(Label)
-            rendered = label.render()
+            empty = pane.query_one("#empty-state", Static)
+            assert empty.visible is True
+            rendered = empty.render()
             rendered_text = rendered.plain if hasattr(rendered, "plain") else str(rendered)
             assert "暂无供应商" in rendered_text
+
+            list_view = pane.query_one("#provider-list", ListView)
+            assert list_view.visible is False
 
 
 @pytest.mark.asyncio
@@ -1255,14 +1265,14 @@ async def test_refresh_providers_no_port():
         pane = app.query_one(ProvidersPane)
         assert pane.providers == []
 
-        list_view = pane.query_one("#provider-list", ListView)
-        items = list(list_view.query(ListItem))
-        assert len(items) == 1
-
-        label = items[0].query_one(Label)
-        rendered = label.render()
+        empty = pane.query_one("#empty-state", Static)
+        assert empty.visible is True
+        rendered = empty.render()
         rendered_text = rendered.plain if hasattr(rendered, "plain") else str(rendered)
         assert "网关未运行" in rendered_text
+
+        list_view = pane.query_one("#provider-list", ListView)
+        assert list_view.visible is False
 
 
 # -- add-provider button --------------------------------------------
@@ -1391,6 +1401,8 @@ async def test_on_button_pressed_btn_delete_provider_no_port():
             # Force-set providers so a selection will find a match
             pane.providers = [{"id": "p1", "name": "P1"}]
             list_view = pane.query_one("#provider-list", ListView)
+            # Populate list_view so setting index works
+            list_view.append(ListItem(Label("P1")))
             list_view.index = 0
             await pilot.pause()
 
