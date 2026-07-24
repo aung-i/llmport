@@ -8,7 +8,6 @@ headers and defaults so the call sites in ``server.py`` remain unchanged.
 import httpx
 
 from llmport.models.provider import ProviderConfig
-from llmport.gateway.ip_utils import validate_public_url
 
 
 async def forward(
