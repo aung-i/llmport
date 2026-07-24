@@ -103,19 +103,13 @@ class ModelsPane(Vertical):
         data = await async_get_json(f"http://127.0.0.1:{port}/api/status") or {}
         self.active_model = data.get("active_model")
 
-        providers_data = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
-        alias_map: dict[str, set[str]] = {}
-        for p in providers_data:
-            for m in p.get("models", []):
-                aliases = m.get("aliases", []) or [m["name"]]
-                for alias in aliases:
-                    if alias not in alias_map:
-                        alias_map[alias] = set()
-                    alias_map[alias].add(p["id"])
-
+        models_data = (
+            await async_get_json(f"http://127.0.0.1:{port}/api/models") or {}
+        )
+        models_list = models_data.get("models") if isinstance(models_data, dict) else models_data or []
         self.models = [
-            {"id": alias, "provider_count": len(providers)}
-            for alias, providers in alias_map.items()
+            {"id": m["id"], "provider_count": m.get("provider_count", 0)}
+            for m in models_list
         ]
 
         list_view = self.query_one("#model-list", ListView)
@@ -157,20 +151,24 @@ class ModelsPane(Vertical):
             if list_view.index is not None and list_view.index < len(self._filtered_models):
                 model = self._filtered_models[list_view.index]
                 daemon = self.app.daemon  # type: ignore
-                # Fetch full model data via status endpoint to get bindings
+                # Fetch full model data via /api/models endpoint
                 port = daemon.get_control_port()
                 bindings = []
                 if port:
-                    providers_data = await async_get_json(f"http://127.0.0.1:{port}/api/providers") or []
-                    for p in providers_data:
-                        for m in p.get("models", []):
-                            aliases = m.get("aliases", []) or [m["name"]]
-                            if model["id"] in aliases:
-                                bindings.append({
-                                    "provider_id": p["id"],
-                                    "model_name": m["name"],
-                                    "priority": 1,
-                                })
+                    models_data = (
+                        await async_get_json(
+                            f"http://127.0.0.1:{port}/api/models"
+                        ) or {}
+                    )
+                    models_list = (
+                        models_data.get("models")
+                        if isinstance(models_data, dict)
+                        else models_data or []
+                    )
+                    for m in models_list:
+                        if m["id"] == model["id"]:
+                            bindings = m.get("bindings", [])
+                            break
                 model_with_bindings = {**model, "bindings": bindings}
                 await self.app.push_screen(  # type: ignore
                     ModelDetailScreen(model_with_bindings, self.app.daemon)  # type: ignore

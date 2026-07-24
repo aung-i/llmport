@@ -217,29 +217,39 @@ class LlmPortApp(App):
         self.daemon = DaemonManager()
 
     async def on_mount(self) -> None:
-        # Auto-start daemon if not running (design spec: TUI-first, gateway-second)
+        """On mount: check for first-run, push onboarding if needed.
+
+        The daemon is NOT auto-started here.  It is started either by the
+        onboarding completion flow or when the user explicitly starts it
+        via the gateway tab.
+        """
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore()
+        first_run = False
+        try:
+            data = store.load()
+            if not data.get("providers"):
+                first_run = True
+        except Exception:
+            first_run = True
+
+        if first_run:
+            self.push_screen(OnboardingScreen(), self._on_onboarding_done)
+
+    async def _on_onboarding_done(self, _result=None) -> None:
+        """Called when the onboarding screen is dismissed.
+
+        Starts the daemon and refreshes the UI.
+        """
         if not self.daemon.is_running():
             self.daemon.start()
-            # Give daemon a moment to initialize
             import asyncio
             await asyncio.sleep(1.0)
-
-        # Refresh all panes now that daemon is ready
-        # (panes mounted before daemon started, need explicit refresh)
         try:
             await self.query_one(ModelsPane).refresh_models()
         except Exception:
             pass
-
-        # Check if first run: no providers configured
-        from llmport.config.store import ConfigStore
-        store = ConfigStore()
-        try:
-            data = store.load()
-            if not data.get("providers"):
-                self.push_screen(OnboardingScreen())
-        except Exception:
-            self.push_screen(OnboardingScreen())
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="app-header"):

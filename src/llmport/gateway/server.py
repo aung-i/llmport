@@ -1,4 +1,11 @@
-"""Gateway HTTP server with OpenAI and Anthropic protocol endpoints."""
+"""Gateway HTTP server — route handlers and application factory.
+
+This module owns the protocol-specific route handlers (``openai_chat``,
+``anthropic_messages``, etc.) and the ``create_app()`` factory.
+
+State management lives in :mod:`llmport.gateway.state` and control-API
+endpoints live in :mod:`llmport.gateway.control_api`.
+"""
 
 import json as _json
 import time
@@ -12,20 +19,23 @@ from llmport.config.store import ConfigStore
 from llmport.models.provider import ProviderConfig
 from llmport.models.model import merge_aliases_into_logical_models
 from llmport.gateway.router import Router, RouterError
+from llmport.gateway.state import migrate_gateway_config, GatewayState, init_state, get_state
 from llmport.gateway import openai_handler, anthropic_handler
+from llmport.gateway.control_api import (
+    control_status,
+    control_switch_model,
+    control_models,
+    control_providers,
+    control_test_provider,
+    control_fetch_models,
+    control_gateway_config,
+    control_daemon_stop,
+    control_daemon_restart,
+)
 
-
-def _migrate_gateway_config(data: dict) -> dict:
-    """Migrate old-format gateway config (openai_port/anthropic_port) to new format (host/port).
-
-    Modifies *data* in place when migration is needed so callers can persist
-    the result.  Returns the canonical ``{"host": str, "port": int}`` dict.
-    """
-    gw = data.get("gateway", {})
-    if "host" not in gw:
-        gw = {"host": "127.0.0.1", "port": gw.get("openai_port", 11434)}
-        data["gateway"] = gw
-    return {"host": gw["host"], "port": gw.get("port", 11434)}
+# ============================================================================
+# Token-tracking helpers
+# ============================================================================
 
 
 def _safe_token_val(val) -> int:
@@ -116,75 +126,14 @@ async def _tracked_stream(generator, state):
         state.request_count += 1
 
 
-class GatewayState:
-    """Mutable state shared between the server and control API."""
+# ============================================================================
+# OpenAI protocol endpoints
+# ============================================================================
 
-    def __init__(self, store: ConfigStore):
-        self.store = store
-        self.providers: list[ProviderConfig] = []
-        self.models = []
-        self.active_model_id: str | None = None
-        self.started_at = time.time()
-        self.request_count = 0
-        self.total_tokens = 0
-        self.reload()
-
-    def reload(self) -> None:
-        """Reload config from disk."""
-        data = self.store.load()
-        had_host = "host" in data.get("gateway", {})
-        self.gateway = _migrate_gateway_config(data)
-        if not had_host:
-            self.store.save(data)
-        self.providers = [
-            ProviderConfig.from_dict(p) for p in data.get("providers", [])
-        ]
-        self.models = merge_aliases_into_logical_models(
-            self.providers, data.get("models", []),
-        )
-        self.active_model_id = data.get("active_model")
-
-    def save(self) -> None:
-        """Persist current state to disk."""
-        data = {
-            "version": 1,
-            "gateway": self.gateway,
-            "providers": [p.to_dict() for p in self.providers],
-            "models": [
-                {
-                    "id": m.id,
-                    "bindings": [
-                        {
-                            "provider_id": b.provider_id,
-                            "model_name": b.model_name,
-                            "priority": b.priority,
-                        }
-                        for b in m.bindings
-                    ],
-                    "routing_strategy": m.routing_strategy,
-                }
-                for m in self.models
-            ],
-            "active_model": self.active_model_id,
-        }
-        self.store.save(data)
-
-    def get_router(self) -> Router:
-        return Router(self.providers, self.models, self.active_model_id)
-
-
-STATE: GatewayState | None = None
-
-
-def _get_state() -> GatewayState:
-    assert STATE is not None
-    return STATE
-
-
-# --- OpenAI endpoints ---
 
 async def openai_chat(request: Request) -> Response:
-    state = _get_state()
+    """POST /openai/v1/chat/completions (and SDK alias ``/v1/chat/completions``)."""
+    state = get_state()
     router = state.get_router()
     try:
         provider, model_name = router.resolve()
@@ -251,7 +200,9 @@ async def openai_chat(request: Request) -> Response:
                 if fb_provider.protocol != "openai":
                     last_id = fb_provider.id
                     continue
-                result, error = await openai_handler.forward(body, fb_provider, fb_model)
+                result, error = await openai_handler.forward(
+                    body, fb_provider, fb_model
+                )
                 if not error:
                     break
                 last_id = fb_provider.id
@@ -265,7 +216,7 @@ async def openai_chat(request: Request) -> Response:
 
 async def openai_models(request: Request) -> Response:
     """Return a filtered list of models available on the active route."""
-    state = _get_state()
+    state = get_state()
     return JSONResponse({
         "object": "list",
         "data": [
@@ -285,7 +236,7 @@ async def openai_catchall(request: Request) -> Response:
     level.  Protocol-specific endpoints (``/v1/chat/completions``)
     with full fallback + stats are handled by ``openai_chat``.
     """
-    state = _get_state()
+    state = get_state()
     router = state.get_router()
     try:
         provider, model_name = router.resolve()
@@ -310,10 +261,14 @@ async def openai_catchall(request: Request) -> Response:
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-# --- Anthropic endpoints ---
+# ============================================================================
+# Anthropic protocol endpoints
+# ============================================================================
+
 
 async def anthropic_messages(request: Request) -> Response:
-    state = _get_state()
+    """POST /anthropic/v1/messages (and SDK alias ``/v1/messages``)."""
+    state = get_state()
     router = state.get_router()
     try:
         provider, model_name = router.resolve()
@@ -380,7 +335,9 @@ async def anthropic_messages(request: Request) -> Response:
                 if fb_provider.protocol != "anthropic":
                     last_id = fb_provider.id
                     continue
-                result, error = await anthropic_handler.forward(body, fb_provider, fb_model)
+                result, error = await anthropic_handler.forward(
+                    body, fb_provider, fb_model
+                )
                 if not error:
                     break
                 last_id = fb_provider.id
@@ -392,150 +349,9 @@ async def anthropic_messages(request: Request) -> Response:
         return JSONResponse(result)
 
 
-# --- Control API ---
-
-async def control_status(request: Request) -> JSONResponse:
-    state = _get_state()
-    return JSONResponse({
-        "active_model": state.active_model_id,
-        "uptime": time.time() - state.started_at,
-        "request_count": state.request_count,
-        "total_tokens": state.total_tokens,
-        "provider_count": len(state.providers),
-        "model_count": len(state.models),
-        "providers": [
-            {
-                "id": p.id,
-                "name": p.name,
-                "status": p.health.status,
-                "latency_ms": p.health.latency_ms,
-            }
-            for p in state.providers
-        ],
-    })
-
-
-async def control_switch_model(request: Request) -> JSONResponse:
-    state = _get_state()
-    body = await request.json()
-    model_id = body.get("model_id")
-    state.active_model_id = model_id
-    state.save()
-    return JSONResponse({"ok": True, "active_model": model_id})
-
-
-async def control_providers(request: Request) -> JSONResponse:
-    state = _get_state()
-    if request.method == "GET":
-        return JSONResponse([p.to_dict(include_key=False) for p in state.providers])
-    elif request.method == "POST":
-        body = await request.json()
-        provider = ProviderConfig.from_dict(body)
-        existing = [p for p in state.providers if p.id != provider.id]
-        existing.append(provider)
-        state.providers = existing
-        state.models = merge_aliases_into_logical_models(
-            state.providers,
-            [{"id": m.id, "bindings": [
-                {"provider_id": b.provider_id, "model_name": b.model_name, "priority": b.priority}
-                for b in m.bindings
-            ]} for m in state.models],
-        )
-        state.save()
-        return JSONResponse({"ok": True})
-    elif request.method == "DELETE":
-        body = await request.json()
-        provider_id = body.get("id")
-        if not provider_id:
-            return JSONResponse({"ok": False, "error": "Missing provider id"}, status_code=400)
-        state.providers = [p for p in state.providers if p.id != provider_id]
-        state.models = merge_aliases_into_logical_models(
-            state.providers,
-            [{"id": m.id, "bindings": [
-                {"provider_id": b.provider_id, "model_name": b.model_name, "priority": b.priority}
-                for b in m.bindings
-            ]} for m in state.models],
-        )
-        state.save()
-        return JSONResponse({"ok": True})
-
-
-async def control_test_provider(request: Request) -> JSONResponse:
-    """Test a provider connection.
-
-    For OpenAI providers, uses list_models as a connectivity check.
-    For Anthropic providers, uses test_connection.
-    """
-    state = _get_state()
-    body = await request.json()
-    provider = ProviderConfig.from_dict(body)
-    if provider.protocol == "openai":
-        t0 = time.monotonic()
-        models, error = await openai_handler.list_models(provider)
-        latency = (time.monotonic() - t0) * 1000
-        ok = models is not None
-    else:
-        ok, latency, error = await anthropic_handler.test_connection(provider)
-    return JSONResponse({"ok": ok, "latency_ms": latency, "error": error})
-
-
-async def control_fetch_models(request: Request) -> JSONResponse:
-    """Fetch model list from a provider. Accepts a full provider body so it
-    works before the provider is saved."""
-    body = await request.json()
-    provider = ProviderConfig.from_dict(body)
-    if provider.protocol == "openai":
-        models, error = await openai_handler.list_models(provider)
-    else:
-        models, error = None, "Anthropic does not expose a model list API"
-    return JSONResponse({"models": models, "error": error})
-
-
-async def control_gateway_config(request: Request) -> JSONResponse:
-    """Get or update gateway configuration."""
-    state = _get_state()
-    if request.method == "GET":
-        return JSONResponse(state.gateway)
-    elif request.method == "POST":
-        body = await request.json()
-        host = body.get("host", "127.0.0.1").strip()
-        port = int(body.get("port", 11434))
-
-        # Validate host is non-empty and reasonable length
-        if not host or len(host) > 253:
-            return JSONResponse(
-                {"ok": False, "error": f"无效的主机地址: {host}"},
-                status_code=400,
-            )
-
-        if not (1024 <= port <= 65535):
-            return JSONResponse(
-                {"ok": False, "error": f"端口号超出范围: {port} (1024-65535)"},
-                status_code=400,
-            )
-
-        state.gateway = {"host": host, "port": port}
-        state.save()
-
-        # Warn if binding to a non-loopback address (gateway will be network-accessible)
-        warning = None
-        if host not in {"127.0.0.1", "localhost", "::1"}:
-            warning = f"网关绑定到 {host}，局域网内其他设备可访问你的 API key"
-
-        return JSONResponse({"ok": True, "gateway": state.gateway, "warning": warning})
-
-
-async def control_daemon_stop(request: Request) -> JSONResponse:
-    """Initiate graceful shutdown."""
-    import os
-    import signal
-    os.kill(os.getpid(), signal.SIGTERM)
-    return JSONResponse({"ok": True})
-
-
-async def control_daemon_restart(request: Request) -> JSONResponse:
-    """Signal the launcher to restart the gateway."""
-    return JSONResponse({"ok": True, "action": "restart"})
+# ============================================================================
+# Application factory
+# ============================================================================
 
 
 def create_app(store: ConfigStore) -> tuple[Starlette, Starlette]:
@@ -543,24 +359,28 @@ def create_app(store: ConfigStore) -> tuple[Starlette, Starlette]:
 
     Returns a ``(gateway_app, control_app)`` tuple:
 
-    - **gateway_app** — OpenAI and Anthropic protocol endpoints only.
+    - **gateway_app** — OpenAI and Anthropic protocol endpoints, including
+      SDK-compatible short paths (``/v1/chat/completions``).
     - **control_app** — Control API endpoints (``/api/*``) only.
     """
-    global STATE
-    STATE = GatewayState(store)
+    init_state(store)
 
     gateway_routes = [
-        # OpenAI protocol
+        # OpenAI protocol (explicit prefix + SDK short path)
         Route("/openai/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/openai/v1/models", openai_models, methods=["GET"]),
         Route("/openai/v1/{path:path}", openai_catchall, methods=["POST", "GET"]),
-        # Anthropic protocol
+        # Anthropic protocol (explicit prefix + SDK short path)
         Route("/anthropic/v1/messages", anthropic_messages, methods=["POST"]),
+        # SDK-compatible alias paths (Issue #3)
+        Route("/v1/chat/completions", openai_chat, methods=["POST"]),
+        Route("/v1/messages", anthropic_messages, methods=["POST"]),
     ]
 
     control_routes = [
         Route("/api/status", control_status, methods=["GET"]),
         Route("/api/models/switch", control_switch_model, methods=["POST"]),
+        Route("/api/models", control_models, methods=["GET"]),
         Route("/api/providers", control_providers, methods=["GET", "POST", "DELETE"]),
         Route("/api/providers/test", control_test_provider, methods=["POST"]),
         Route("/api/providers/models", control_fetch_models, methods=["POST"]),
@@ -570,44 +390,3 @@ def create_app(store: ConfigStore) -> tuple[Starlette, Starlette]:
     ]
 
     return Starlette(routes=gateway_routes), Starlette(routes=control_routes)
-
-
-def run_daemon(store: ConfigStore) -> None:
-    """Start the gateway daemon on the configured host:port (default 127.0.0.1:11434)
-    and the control port from LLMGATE_CONTROL_PORT.
-
-    Gateway and control APIs run as separate Starlette applications on separate
-    ports.  The gateway app serves OpenAI/Anthropic protocol endpoints; the
-    control app serves ``/api/*`` endpoints.
-    """
-    import os
-    import threading
-    import uvicorn
-
-    gateway_app, control_app = create_app(store)
-    control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
-
-    gw = _migrate_gateway_config(store.load())
-    host = gw["host"]
-    gateway_port = gw["port"]
-
-    def _serve(app, port: int) -> None:
-        config = uvicorn.Config(
-            app,
-            host=host,
-            port=port,
-            log_level="warning",
-        )
-        uvicorn.Server(config).run()
-
-    # Start gateway on gateway port in a daemon thread
-    t = threading.Thread(
-        target=_serve, args=(gateway_app, gateway_port), daemon=True
-    )
-    t.start()
-
-    # Control port runs in the main thread (handles signals for graceful stop)
-    if control_port:
-        _serve(control_app, control_port)
-    else:
-        t.join()

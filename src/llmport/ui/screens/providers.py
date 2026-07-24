@@ -7,6 +7,7 @@ from textual.screen import ModalScreen
 import httpx
 
 from llmport.daemon import DaemonManager
+from llmport.models.parser import parse_models
 from llmport.ui.screens.onboarding import async_get_json
 from llmport.ui.widgets import Section
 
@@ -55,8 +56,8 @@ class ProviderFormScreen(ModalScreen):
             )
             yield Label("[dim]API Key[/]")
             yield Input(
-                value=self.provider.get("api_key", "") if self.provider else "",
-                placeholder="sk-ant-api03-...",
+                value="",
+                placeholder="保留原值，留空则不修改" if self.is_edit else "sk-ant-api03-...",
                 password=True,
                 id="input-key",
             )
@@ -99,7 +100,9 @@ class ProviderFormScreen(ModalScreen):
             return
 
         name = self.query_one("#input-name", Input).value
-        key = self.query_one("#input-key", Input).value
+        raw_key = self.query_one("#input-key", Input).value
+        # When editing and key field is empty, signal "keep existing"
+        key = raw_key if raw_key else ("***" if self.is_edit else "")
         url = self.query_one("#input-url", Input).value
         protocol = self.query_one("#select-protocol", Select).value
         models_raw = self.query_one("#input-models", Input).value
@@ -110,7 +113,7 @@ class ProviderFormScreen(ModalScreen):
             return
 
         if event.button.id == "btn-test":
-            models = _parse_models(models_raw)
+            models = parse_models(models_raw)
             body = {
                 "id": name.lower().replace(" ", "-"),
                 "name": name,
@@ -156,7 +159,7 @@ class ProviderFormScreen(ModalScreen):
             return
 
         if event.button.id == "btn-save":
-            models = _parse_models(models_raw)
+            models = parse_models(models_raw)
             body = {
                 "id": name.lower().replace(" ", "-"),
                 "name": name,
@@ -176,18 +179,6 @@ class ProviderFormScreen(ModalScreen):
             self.notify(f"已保存: {name}", title="供应商")
             self.dismiss()
             await self.app.query_one(ProvidersPane).refresh_providers()  # type: ignore
-
-
-def _parse_models(raw: str) -> list[dict]:
-    """Parse comma-separated model input into model dicts."""
-    models = []
-    for line in raw.strip().split("\n"):
-        if not line.strip():
-            continue
-        parts = [p.strip() for p in line.split(",") if p.strip()]
-        if parts:
-            models.append({"name": parts[0], "aliases": parts[1:]})
-    return models
 
 
 class ProvidersPane(Vertical):

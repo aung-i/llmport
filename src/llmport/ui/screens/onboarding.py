@@ -80,13 +80,21 @@ class OnboardingScreen(ModalScreen):
         if event.button.id == "btn-start-setup":
             store = ConfigStore()
             store.init_first_run()
+
+            # Start the daemon so the ProviderFormScreen can make API calls
+            daemon = self.app.daemon  # type: ignore
+            if not daemon.is_running():
+                daemon.start()
+                import asyncio
+                await asyncio.sleep(1.0)
+
             self._step = 1
             # Import lazily to avoid circular dependency
             from llmport.ui.screens.providers import ProviderFormScreen
 
             self.app.notify("配置已初始化，请添加你的第一个 Provider", title="第一步")  # type: ignore
             await self.app.push_screen(  # type: ignore
-                ProviderFormScreen(self.app.daemon),  # type: ignore
+                ProviderFormScreen(daemon),
                 self._on_provider_done,
             )
         elif event.button.id == "btn-finish":

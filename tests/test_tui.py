@@ -32,9 +32,10 @@ async def test_provider_form_screen_composes_without_error():
                     break
             assert onboard is not None, "OnboardingScreen should be showing"
 
-            # Click "开始设置" — this pushes ProviderFormScreen
+            # Click "开始设置" — this starts the daemon and pushes ProviderFormScreen
             await pilot.click("#btn-start-setup")
-            await pilot.pause(0.5)
+            # Allow time for daemon start (1s sleep in onboarding) + push
+            await pilot.pause(2.0)
 
             # ProviderFormScreen should now be in the screen stack
             from llmport.ui.screens.providers import ProviderFormScreen
@@ -68,9 +69,10 @@ async def test_onboarding_flow_completes_without_error():
                     break
             assert onboard is not None
 
-            # Click 开始设置
+            # Click 开始设置 — daemon start + ProviderFormScreen push
             await pilot.click("#btn-start-setup")
-            await pilot.pause(1.0)
+            # Allow time for daemon start (1s sleep in onboarding) + push
+            await pilot.pause(2.5)
 
             # ProviderFormScreen should be mounted without crash
             form_found = False

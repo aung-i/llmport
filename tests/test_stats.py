@@ -58,7 +58,7 @@ class TestNonStreamingStats:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
-            assert gateway_server.STATE.request_count == 0
+            assert gateway_server.get_state().request_count == 0
 
             with patch(
                 "llmport.gateway.server.openai_handler.forward",
@@ -70,14 +70,14 @@ class TestNonStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.request_count == 1
+            assert gateway_server.get_state().request_count == 1
 
     def test_accumulates_total_tokens(self):
         """total_tokens is extracted from the usage field of the response."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
-            assert gateway_server.STATE.total_tokens == 0
+            assert gateway_server.get_state().total_tokens == 0
 
             with patch(
                 "llmport.gateway.server.openai_handler.forward",
@@ -89,7 +89,7 @@ class TestNonStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.total_tokens == 30
+            assert gateway_server.get_state().total_tokens == 30
 
     def test_accumulates_multiple_calls(self):
         """Multiple requests sum request_count and total_tokens."""
@@ -108,8 +108,8 @@ class TestNonStreamingStats:
                     })
                     assert resp.status_code == 200
 
-            assert gateway_server.STATE.request_count == 3
-            assert gateway_server.STATE.total_tokens == 90  # 3 * 30
+            assert gateway_server.get_state().request_count == 3
+            assert gateway_server.get_state().total_tokens == 90  # 3 * 30
 
     def test_no_usage_field_does_not_error(self):
         """When the response has no usage field, no error is raised and
@@ -128,8 +128,8 @@ class TestNonStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.request_count == 1
-            assert gateway_server.STATE.total_tokens == 0
+            assert gateway_server.get_state().request_count == 1
+            assert gateway_server.get_state().total_tokens == 0
 
     def test_negative_usage_sanitised(self):
         """Negative total_tokens is sanitised to 0 via max(0, value)."""
@@ -149,7 +149,7 @@ class TestNonStreamingStats:
 
             assert resp.status_code == 200
             # max(0, -5) => 0, so total_tokens stays 0
-            assert gateway_server.STATE.total_tokens == 0
+            assert gateway_server.get_state().total_tokens == 0
 
     def test_non_int_usage_skipped(self):
         """Non-integer total_tokens (e.g. string) is skipped without error."""
@@ -168,9 +168,9 @@ class TestNonStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.request_count == 1
+            assert gateway_server.get_state().request_count == 1
             # total_tokens should remain unchanged (0)
-            assert gateway_server.STATE.total_tokens == 0
+            assert gateway_server.get_state().total_tokens == 0
 
 
 # ──────────────────────────────────────────────
@@ -204,7 +204,7 @@ class TestStreamingStats:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
-            assert gateway_server.STATE.request_count == 0
+            assert gateway_server.get_state().request_count == 0
 
             with patch(
                 "llmport.gateway.server.openai_handler.stream",
@@ -217,14 +217,14 @@ class TestStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.request_count == 1
+            assert gateway_server.get_state().request_count == 1
 
     def test_streaming_parses_usage(self):
         """total_tokens is extracted from usage in the final SSE chunk."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
-            assert gateway_server.STATE.total_tokens == 0
+            assert gateway_server.get_state().total_tokens == 0
 
             with patch(
                 "llmport.gateway.server.openai_handler.stream",
@@ -237,7 +237,7 @@ class TestStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.total_tokens == 7
+            assert gateway_server.get_state().total_tokens == 7
 
     def test_streaming_no_usage_does_not_error(self):
         """When streaming chunks contain no usage, no error is raised."""
@@ -256,5 +256,5 @@ class TestStreamingStats:
                 })
 
             assert resp.status_code == 200
-            assert gateway_server.STATE.request_count == 1
-            assert gateway_server.STATE.total_tokens == 0
+            assert gateway_server.get_state().request_count == 1
+            assert gateway_server.get_state().total_tokens == 0

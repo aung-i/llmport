@@ -2,7 +2,8 @@
 
 import tempfile
 from llmport.config.store import ConfigStore
-from llmport.gateway.server import create_app, _migrate_gateway_config
+from llmport.gateway.server import create_app
+from llmport.gateway.state import migrate_gateway_config
 from starlette.testclient import TestClient
 
 
@@ -156,18 +157,18 @@ def test_gateway_config():
 
 
 def test_config_migration_old_format():
-    """_migrate_gateway_config converts old openai_port format."""
+    """migrate_gateway_config converts old openai_port format."""
     data = {"gateway": {"openai_port": 8080}}
-    result = _migrate_gateway_config(data)
+    result = migrate_gateway_config(data)
     assert result == {"host": "127.0.0.1", "port": 8080}
     # Data dict was migrated in place
     assert data["gateway"] == {"host": "127.0.0.1", "port": 8080}
 
 
 def test_config_migration_empty_gateway():
-    """_migrate_gateway_config with empty gateway uses defaults."""
+    """migrate_gateway_config with empty gateway uses defaults."""
     data = {"gateway": {}}
-    result = _migrate_gateway_config(data)
+    result = migrate_gateway_config(data)
     assert result == {"host": "127.0.0.1", "port": 11434}
 
 
@@ -217,8 +218,8 @@ def test_daemon_restart_endpoint():
         assert resp.json()["action"] == "restart"
 
 
-def test_gateway_config_accepts_any_valid_host():
-    """POST /api/gateway/config with 0.0.0.0 is accepted with warning."""
+def test_gateway_config_rejects_non_loopback():
+    """POST /api/gateway/config with non-loopback address is rejected (Issue 9)."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
@@ -229,11 +230,10 @@ def test_gateway_config_accepts_any_valid_host():
             "host": "0.0.0.0",
             "port": 11434,
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 400
         data = resp.json()
-        assert data["ok"] is True
-        assert data["gateway"]["host"] == "0.0.0.0"
-        assert data.get("warning") is not None  # non-loopback → warning
+        assert data["ok"] is False
+        assert "回环地址" in data["error"]
 
 
 def test_gateway_config_rejects_empty_host():
@@ -296,10 +296,10 @@ def test_control_fetch_models_endpoint():
 
 def test_parse_models_utility():
     """Test _parse_models with various inputs."""
-    from llmport.ui.screens.providers import _parse_models
+    from llmport.models.parser import parse_models
 
     # Normal input
-    result = _parse_models("gpt-5,gpt5,chatgpt\nclaude-opus,opus")
+    result = parse_models("gpt-5,gpt5,chatgpt\nclaude-opus,opus")
     assert len(result) == 2
     assert result[0]["name"] == "gpt-5"
     assert result[0]["aliases"] == ["gpt5", "chatgpt"]
@@ -307,13 +307,13 @@ def test_parse_models_utility():
     assert result[1]["aliases"] == ["opus"]
 
     # Empty string
-    assert _parse_models("") == []
+    assert parse_models("") == []
 
     # Whitespace only
-    assert _parse_models("  \n  \n") == []
+    assert parse_models("  \n  \n") == []
 
     # Single model no aliases
-    result = _parse_models("gpt-5")
+    result = parse_models("gpt-5")
     assert len(result) == 1
     assert result[0]["name"] == "gpt-5"
     assert result[0]["aliases"] == []

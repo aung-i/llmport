@@ -146,9 +146,12 @@ def run_daemon() -> None:
     import os
     import time
     import json
+    import threading
+    import uvicorn
 
     from llmport.config.store import ConfigStore
-    from llmport.gateway.server import run_daemon as _server_run_daemon
+    from llmport.gateway.server import create_app
+    from llmport.gateway.state import migrate_gateway_config
 
     store = ConfigStore()
     if not store.key_path.exists():
@@ -163,7 +166,6 @@ def run_daemon() -> None:
     pid_dir = os.path.join(config_dir, "llmport")
     os.makedirs(pid_dir, exist_ok=True)
     pid_path = os.path.join(pid_dir, "daemon.pid")
-    pid_path_write = pid_path  # alias for clarity in json.dumps below
     with open(pid_path, "w") as f:
         json.dump({
             "pid": os.getpid(),
@@ -171,4 +173,30 @@ def run_daemon() -> None:
             "started_at": time.time(),
         }, f)
 
-    _server_run_daemon(store)
+    # Create the two applications
+    gateway_app, control_app = create_app(store)
+
+    gw = migrate_gateway_config(store.load())
+    host = gw["host"]
+    gateway_port = gw["port"]
+
+    def _serve(app, port: int) -> None:
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+        )
+        uvicorn.Server(config).run()
+
+    # Start gateway on gateway port in a daemon thread
+    t = threading.Thread(
+        target=_serve, args=(gateway_app, gateway_port), daemon=True
+    )
+    t.start()
+
+    # Control port runs in the main thread (handles signals for graceful stop)
+    if control_port:
+        _serve(control_app, control_port)
+    else:
+        t.join()

@@ -25,7 +25,7 @@ def test_create_app_returns_starlette():
         gateway_app, control_app = create_app(store)
         assert gateway_app is not None
         assert control_app is not None
-        # Gateway should have 4 routes (chat, models, catchall, messages)
-        assert len(gateway_app.routes) == 4
-        # Control should have 8 routes
-        assert len(control_app.routes) == 8
+        # Gateway should have 6 routes (chat, models, catchall, messages, SDK aliases)
+        assert len(gateway_app.routes) == 6
+        # Control should have 9 routes (added /api/models)
+        assert len(control_app.routes) == 9
