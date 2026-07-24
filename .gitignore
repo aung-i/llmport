@@ -17,3 +17,4 @@ venv/
 config.enc
 .superpowers/
 .playwright-mcp/
+.coverage

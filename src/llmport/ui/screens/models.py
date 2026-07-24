@@ -15,6 +15,30 @@ if TYPE_CHECKING:
     from llmport.app import LlmPortApp
 
 
+def _to_models_list(api_response: dict | list | None) -> list[dict]:
+    """Convert a raw ``/api/models`` response to a list of model dicts.
+
+    Handles every edge case the wire can throw at us:
+
+    * ``None`` / ``"models": null`` / missing key / empty dict -> ``[]``
+    * ``[...]`` (already a list) -> identity
+    * ``{"models": [...]}`` -> unwrap the list
+    * ``[]`` (the falsy-list pitfall -- see below)
+
+    **Why not ``or []``?**
+    ``[] or []`` evaluates to ``[]`` (correct), but ``[] or {}`` evaluates
+    to ``{}`` (broken), and then ``{}.get("models")`` returns ``None``,
+    causing ``TypeError`` on iteration.
+    """
+    if api_response is None:
+        return []
+    if isinstance(api_response, dict):
+        return api_response.get("models") or []
+    if isinstance(api_response, list):
+        return api_response
+    return []
+
+
 class ModelDetailScreen(ModalScreen):
     """Modal for viewing/editing a model's provider bindings."""
 
@@ -108,10 +132,9 @@ class ModelsPane(Vertical):
         data = await async_get_json(f"http://127.0.0.1:{port}/api/status") or {}
         self.active_model = data.get("active_model")
 
-        models_data = (
-            await async_get_json(f"http://127.0.0.1:{port}/api/models") or {}
+        models_list = _to_models_list(
+            await async_get_json(f"http://127.0.0.1:{port}/api/models")
         )
-        models_list = models_data.get("models") if isinstance(models_data, dict) else models_data or []
         self.models = [
             {"id": m["id"], "provider_count": m.get("provider_count", 0)}
             for m in models_list
@@ -160,15 +183,10 @@ class ModelsPane(Vertical):
                 port = daemon.get_control_port()
                 bindings = []
                 if port:
-                    models_data = (
+                    models_list = _to_models_list(
                         await async_get_json(
                             f"http://127.0.0.1:{port}/api/models"
-                        ) or {}
-                    )
-                    models_list = (
-                        models_data.get("models")
-                        if isinstance(models_data, dict)
-                        else models_data or []
+                        )
                     )
                     for m in models_list:
                         if m["id"] == model["id"]:

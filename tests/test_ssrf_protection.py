@@ -6,6 +6,7 @@ Requires:
 """
 
 import inspect
+from unittest.mock import patch
 
 
 class TestValidatePublicUrl:
@@ -39,6 +40,24 @@ class TestValidatePublicUrl:
         from llmport.gateway.ip_utils import validate_public_url
         assert validate_public_url("http://0.0.0.0") is False
 
+    def test_rejects_multicast(self):
+        """validate_public_url must reject multicast addresses (224.0.0.0/4)."""
+        from llmport.gateway.ip_utils import validate_public_url
+        assert validate_public_url("http://224.0.0.1") is False
+        assert validate_public_url("http://224.0.0.255") is False
+
+    def test_rejects_reserved(self):
+        """validate_public_url must reject reserved addresses (240.0.0.0/4)."""
+        from llmport.gateway.ip_utils import validate_public_url
+        assert validate_public_url("http://240.0.0.1") is False
+        assert validate_public_url("http://255.255.255.255") is False
+
+    def test_rejects_no_hostname(self):
+        """A URL with no hostname (e.g. http:///path) must be rejected."""
+        from llmport.gateway.ip_utils import validate_public_url
+        # http:///path has netloc='' -> hostname=None -> returns False
+        assert validate_public_url("http:///path") is False
+
     def test_accepts_public_domain(self):
         from llmport.gateway.ip_utils import validate_public_url
         assert validate_public_url("https://api.openai.com/v1/chat") is True
@@ -46,6 +65,42 @@ class TestValidatePublicUrl:
     def test_accepts_public_ip(self):
         from llmport.gateway.ip_utils import validate_public_url
         assert validate_public_url("https://8.8.8.8") is True
+
+    def test_rejects_non_ip_in_resolved(self):
+        """When _resolve_hostname returns something that is not a valid IP
+        address, ip_address() raises ValueError and validate_public_url
+        must return False."""
+        from llmport.gateway.ip_utils import validate_public_url
+        with patch(
+            "llmport.gateway.ip_utils._resolve_hostname",
+            return_value=["not-an-ip"],
+        ):
+            assert validate_public_url("http://example.com") is False
+
+    def test_urlparse_exception_returns_false(self):
+        """If urlparse raises an exception, validate_public_url must
+        catch it and return False."""
+        from llmport.gateway.ip_utils import validate_public_url
+        with patch(
+            "llmport.gateway.ip_utils.urlparse",
+            side_effect=ValueError("malformed URL"),
+        ):
+            assert validate_public_url("http://example.com") is False
+
+
+class TestResolveHostname:
+
+    def test_resolve_hostname_multicast_ip(self):
+        """_resolve_hostname should return a multicast IP as-is without
+        attempting DNS resolution."""
+        from llmport.gateway.ip_utils import _resolve_hostname
+        assert _resolve_hostname("224.0.0.1") == ["224.0.0.1"]
+
+    def test_resolve_hostname_reserved_ip(self):
+        """_resolve_hostname should return a reserved IP as-is without
+        attempting DNS resolution."""
+        from llmport.gateway.ip_utils import _resolve_hostname
+        assert _resolve_hostname("240.0.0.1") == ["240.0.0.1"]
 
 
 class TestHandlerBaseAllowRedirects:
