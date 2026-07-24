@@ -1508,3 +1508,87 @@ async def test_on_list_view_selected():
             assert screen.provider["id"] == "p1"
             assert screen.provider["name"] == "Provider One"
             assert screen.daemon is daemon
+
+
+# ===================================================================
+# ProvidersPane keyboard bindings (Bug 4)
+# ===================================================================
+
+class TestProvidersPaneBindings:
+    """Keyboard binding action methods on ProvidersPane."""
+
+    @pytest.mark.asyncio
+    async def test_action_delete_provider_no_selection(self):
+        """action_delete_provider with no selection does not crash."""
+        daemon = MagicMock(spec=DaemonManager)
+        daemon.get_control_port.return_value = 12345
+
+        with patch(
+            "llmport.ui.screens.providers.async_get_json",
+            new_callable=AsyncMock,
+        ) as mock_get:
+            mock_get.return_value = []
+
+            app = _PaneApp(daemon)
+            async with app.run_test(size=_PANEL_SIZE) as pilot:
+                await pilot.pause()
+                pane = app.query_one(ProvidersPane)
+                pane.action_delete_provider()
+                await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_delete_provider_helper_port_none(self):
+        """_delete_provider with port=None notifies error."""
+        daemon = MagicMock(spec=DaemonManager)
+        daemon.get_control_port.return_value = None
+
+        app = _PaneApp(daemon)
+        async with app.run_test(size=_PANEL_SIZE) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ProvidersPane)
+            with patch.object(app, "notify") as mock_notify:
+                await pane._delete_provider("p1", "P1")
+                await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_delete_provider_helper_http_error(self):
+        """_delete_provider with HTTP error notifies failure."""
+        daemon = MagicMock(spec=DaemonManager)
+        daemon.get_control_port.return_value = 12345
+
+        app = _PaneApp(daemon)
+        async with app.run_test(size=_PANEL_SIZE) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ProvidersPane)
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_client = MagicMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.delete = AsyncMock(return_value=MagicMock(status_code=500))
+                mock_cls.return_value = mock_client
+                with patch.object(app, "notify") as mock_n:
+                    await pane._delete_provider("p1", "P1")
+                    await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_action_add_provider(self):
+        """action_add_provider pushes ProviderFormScreen in add mode."""
+        daemon = MagicMock(spec=DaemonManager)
+        daemon.get_control_port.return_value = 12345
+
+        with patch(
+            "llmport.ui.screens.providers.async_get_json",
+            new_callable=AsyncMock,
+        ) as mock_get:
+            mock_get.return_value = []
+
+            app = _PaneApp(daemon)
+            async with app.run_test(size=_PANEL_SIZE) as pilot:
+                await pilot.pause()
+                pane = app.query_one(ProvidersPane)
+                pane.action_add_provider()
+                await pilot.pause()
+
+                assert len(app.pushed_screens) == 1
+                screen = app.pushed_screens[0]
+                assert isinstance(screen, ProviderFormScreen)
+                assert screen.is_edit is False

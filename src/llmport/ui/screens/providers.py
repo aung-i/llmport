@@ -6,6 +6,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, ListView, ListItem, Label, Button, Input, Select
 from textual.screen import ModalScreen
+from textual.binding import Binding
 import httpx
 
 from llmport.daemon import DaemonManager
@@ -324,6 +325,11 @@ class ProviderFormScreen(ModalScreen):
 class ProvidersPane(Vertical):
     """Provider management panel."""
 
+    BINDINGS = [
+        Binding("delete", "delete_provider", "删除", show=True),
+        Binding("a", "add_provider", "添加", show=True),
+    ]
+
     def __init__(self):
         super().__init__()
         self.providers: list[dict] = []
@@ -404,3 +410,42 @@ class ProvidersPane(Vertical):
             await _p_app2.push_screen(
                 ProviderFormScreen(_p_app2.daemon, provider)
             )
+
+    def action_delete_provider(self) -> None:
+        """Binding: delete — delete the selected provider."""
+        list_view = self.query_one("#provider-list", ListView)
+        if list_view.index is not None and list_view.index < len(self.providers):
+            provider = self.providers[list_view.index]
+            daemon = cast("LlmPortApp", self.app).daemon
+            port = daemon.get_control_port()
+            if port is None:
+                self.notify("网关未运行，无法删除", title="供应商", severity="error")
+                return
+            import asyncio
+            asyncio.ensure_future(self._delete_provider(provider["id"], provider["name"]))
+
+    def action_add_provider(self) -> None:
+        """Binding: a — add a new provider."""
+        _p_app = cast("LlmPortApp", self.app)
+        import asyncio
+        asyncio.ensure_future(
+            _p_app.push_screen(ProviderFormScreen(_p_app.daemon))
+        )
+
+    async def _delete_provider(self, provider_id: str, provider_name: str) -> None:
+        """Delete a provider by id via the API."""
+        daemon = cast("LlmPortApp", self.app).daemon
+        port = daemon.get_control_port()
+        if port is None:
+            self.notify("网关未运行，无法删除", title="供应商", severity="error")
+            return
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.delete(
+                f"http://127.0.0.1:{port}/api/providers",
+                json={"id": provider_id},
+            )
+            if resp.status_code == 200:
+                self.notify(f"已删除: {provider_name}", title="供应商")
+            else:
+                self.notify(f"删除失败", title="供应商", severity="error")
+        await self.refresh_providers()

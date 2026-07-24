@@ -28,4 +28,4 @@ def test_create_app_returns_starlette():
         # Gateway should have 6 routes (chat, models, catchall, messages, SDK aliases)
         assert len(gateway_app.routes) == 6
         # Control should have 9 routes (added /api/models)
-        assert len(control_app.routes) == 9
+        assert len(control_app.routes) == 10

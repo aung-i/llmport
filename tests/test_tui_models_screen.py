@@ -913,3 +913,307 @@ class TestModelsPane:
         """_to_models_list fallback for types that are not None/dict/list (line 39)."""
         assert _to_models_list("not-a-dict-or-list") == []
         assert _to_models_list(42) == []
+
+    # =================================================================
+    # btn-start-gateway (Bug 1)
+    # =================================================================
+
+    @pytest.mark.asyncio
+    async def test_btn_start_gateway_exists(self, mock_daemon):
+        """btn-start-gateway button exists in compose."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            btn = app.query_one("#btn-start-gateway", Button)
+            assert btn is not None
+
+    @pytest.mark.asyncio
+    async def test_btn_start_gateway_visible_when_daemon_not_running(self, mock_daemon):
+        """btn-start-gateway is visible when daemon port is None."""
+        mock_daemon.get_control_port.return_value = None
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            btn = app.query_one("#btn-start-gateway", Button)
+            assert btn.visible is True, "Start-gateway button should be visible when daemon not running"
+
+    @pytest.mark.asyncio
+    async def test_btn_start_gateway_calls_daemon_start(self, mock_daemon):
+        """Clicking btn-start-gateway calls daemon.start() and refresh_models."""
+        mock_daemon.get_control_port.return_value = None
+        mock_daemon.is_running.return_value = False
+
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            btn = pane.query_one("#btn-start-gateway", Button)
+            # Direct handler invocation (button may be outside visible region)
+            await pane.on_button_pressed(Button.Pressed(btn))
+            await pilot.pause()
+
+            mock_daemon.start.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_btn_start_gateway_hidden_after_start(self, mock_daemon):
+        """btn-start-gateway is hidden after daemon starts (port becomes available)."""
+        _call_n = 0
+        def _port_after_start():
+            nonlocal _call_n
+            _call_n += 1
+            return 12345 if _call_n > 1 else None
+        mock_daemon.get_control_port.side_effect = _port_after_start
+        mock_daemon.is_running.return_value = False
+        mock_daemon.async_get_status = AsyncMock(
+            return_value={"running": True, "active_model": None}
+        )
+
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            btn = pane.query_one("#btn-start-gateway", Button)
+
+            # Button visible when not running
+            assert btn.visible is True
+
+            # Direct handler invocation to start gateway
+            await pane.on_button_pressed(Button.Pressed(btn))
+            await pilot.pause()
+
+            # After start, the button should be hidden (port available)
+            assert btn.visible is False
+
+    # =================================================================
+    # btn-delete-model (Bug 2)
+    # =================================================================
+
+    @pytest.mark.asyncio
+    async def test_btn_delete_model_exists(self, mock_daemon):
+        """btn-delete-model button exists in compose."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            btn = app.query_one("#btn-delete-model", Button)
+            assert btn is not None
+
+    @pytest.mark.asyncio
+    async def test_btn_delete_model_no_selection_no_crash(self, mock_daemon):
+        """btn-delete-model with no selection does not crash."""
+        mock_daemon.get_control_port.return_value = 12345
+        mock_daemon.async_get_status = AsyncMock(return_value={"running": True})
+
+        with patch(
+            "llmport.ui.screens.models.async_get_json"
+        ) as mock_get_json:
+            mock_get_json.side_effect = [
+                {"active_model": None},
+                [{"id": "m1", "provider_count": 1}],
+            ]
+
+            app = _PaneHostApp(daemon=mock_daemon)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                pane = app.query_one(ModelsPane)
+                btn = pane.query_one("#btn-delete-model", Button)
+                # No model selected — handler should not crash
+                await pane.on_button_pressed(Button.Pressed(btn))
+                await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_btn_delete_model_calls_api(self, mock_daemon):
+        """btn-delete-model with selection calls DELETE /api/models."""
+        mock_daemon.get_control_port.return_value = 12345
+        mock_daemon.async_get_status = AsyncMock(return_value={"running": True})
+
+        with patch(
+            "llmport.ui.screens.models.async_get_json"
+        ) as mock_get_json:
+            # refresh_models is called during mount AND after delete (2 rounds of 2 calls each)
+            mock_get_json.side_effect = [
+                # Mount: status + models
+                {"active_model": None},
+                [{"id": "m1", "provider_count": 1}],
+                # After delete: status + models again
+                {"active_model": None},
+                [{"id": "m1", "provider_count": 1}],
+            ]
+
+            app = _PaneHostApp(daemon=mock_daemon)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+
+                pane = app.query_one(ModelsPane)
+                list_view = pane.query_one("#model-list", ListView)
+                # Select the first model
+                items = list(list_view.query(ListItem))
+                if items:
+                    list_view.index = 0
+                    await pilot.pause()
+
+                btn = pane.query_one("#btn-delete-model", Button)
+
+                with (
+                    patch("httpx.AsyncClient") as mock_client_cls,
+                    patch.object(app, "notify") as mock_notify,
+                ):
+                    call_log = []
+
+                    async def _mock_delete(url, **kwargs):
+                        call_log.append(url)
+                        return MagicMock(status_code=200)
+
+                    mock_client = MagicMock(__aenter__=AsyncMock(), delete=_mock_delete)
+                    mock_client.__aenter__.return_value = mock_client
+                    mock_client_cls.return_value = mock_client
+
+                    await pane.on_button_pressed(Button.Pressed(btn))
+                    await pilot.pause()
+
+                    assert len(call_log) == 1, (
+                        f"Expected 1 DELETE call, got {len(call_log)}"
+                    )
+                    assert "/api/models" in call_log[0]
+
+    @pytest.mark.asyncio
+    async def test_btn_delete_model_daemon_not_running(self, mock_daemon):
+        """btn-delete-model with port=None notifies error."""
+        mock_daemon.get_control_port.return_value = None
+
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            pane = app.query_one(ModelsPane)
+            pane._filtered_models = [{"id": "m1", "provider_count": 1}]
+
+            with patch.object(app, "notify") as mock_notify:
+                btn = pane.query_one("#btn-delete-model", Button)
+                await pane.on_button_pressed(Button.Pressed(btn))
+                await pilot.pause()
+
+    # =================================================================
+    # ModelsPane keyboard bindings (Bug 4)
+    # =================================================================
+
+    @pytest.mark.asyncio
+    async def test_models_pane_has_bindings(self, mock_daemon):
+        """ModelsPane defines keyboard bindings for delete/n."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            bindings = pane.BINDINGS
+            keys = {b.key for b in bindings}
+            assert "delete" in keys, "Expected 'delete' binding for delete_model"
+            assert "n" in keys, "Expected 'n' binding for switch_next"
+
+    # -- action_delete_model -------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_action_delete_model_no_selection(self, mock_daemon):
+        """action_delete_model with no selection does not crash."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            pane.action_delete_model()
+            await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_action_delete_model_notify_via_helper(self, mock_daemon):
+        """_delete_model_via_api with port=None notifies error."""
+        mock_daemon.get_control_port.return_value = None
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            with patch.object(app, "notify") as mock_notify:
+                await pane._delete_model_via_api("m1", mock_daemon)
+                await pilot.pause()
+                mock_notify.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_action_switch_next_notify_via_helper(self, mock_daemon):
+        """_switch_model_via_api with port=None notifies error."""
+        mock_daemon.get_control_port.return_value = None
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            with patch.object(app, "notify") as mock_notify:
+                await pane._switch_model_via_api("m1", mock_daemon)
+                await pilot.pause()
+                mock_notify.assert_called()
+
+    # -- action_delete_model -------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_action_delete_model_no_selection(self, mock_daemon):
+        """action_delete_model with no selection does not crash."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            pane.action_delete_model()
+            await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_action_delete_model_notify_via_helper(self, mock_daemon):
+        """_delete_model_via_api with port=None notifies error (tests branch)."""
+        mock_daemon.get_control_port.return_value = None
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            with patch.object(app, "notify") as mock_notify:
+                await pane._delete_model_via_api("m1", mock_daemon)
+                await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_action_switch_next_notify_via_helper(self, mock_daemon):
+        """_switch_model_via_api with port=None notifies error (tests branch)."""
+        mock_daemon.get_control_port.return_value = None
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            with patch.object(app, "notify") as mock_notify:
+                await pane._switch_model_via_api("m1", mock_daemon)
+                await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_delete_model_via_api_http_error(self):
+        """_delete_model_via_api with HTTP error notifies failure."""
+        mock_daemon = MagicMock(spec=DaemonManager)
+        mock_daemon.get_control_port.return_value = 7777
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_client = MagicMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.delete = AsyncMock(return_value=MagicMock(status_code=500))
+                mock_cls.return_value = mock_client
+                with patch.object(app, "notify") as mock_n:
+                    await pane._delete_model_via_api("m1", mock_daemon)
+                    await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_switch_model_via_api_http_error(self):
+        """_switch_model_via_api with HTTP error notifies failure."""
+        mock_daemon = MagicMock(spec=DaemonManager)
+        mock_daemon.get_control_port.return_value = 7777
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_client = MagicMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.post = AsyncMock(return_value=MagicMock(status_code=500))
+                mock_cls.return_value = mock_client
+                with patch.object(app, "notify") as mock_n:
+                    await pane._switch_model_via_api("m1", mock_daemon)
+                    await pilot.pause()

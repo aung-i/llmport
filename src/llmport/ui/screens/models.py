@@ -6,6 +6,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, ListView, ListItem, Label, Button, Input, LoadingIndicator
 from textual.screen import ModalScreen
+from textual.binding import Binding
 
 from llmport.daemon import DaemonManager
 from llmport.ui import async_get_json
@@ -104,6 +105,11 @@ class ModelDetailScreen(ModalScreen):
 class ModelsPane(Vertical):
     """Models list with current active model highlighted."""
 
+    BINDINGS = [
+        Binding("delete", "delete_model", "删除", show=True),
+        Binding("n", "switch_next", "切换", show=True),
+    ]
+
     def __init__(self):
         super().__init__()
         self.models: list[dict] = []
@@ -115,10 +121,13 @@ class ModelsPane(Vertical):
         yield Static(id="active-info")
         yield Input(placeholder="搜索模型...", id="model-search")
         with Section("模型列表"):
-            yield Static(id="empty-state")
+            with Container(id="empty-state-container"):
+                yield Static(id="empty-state")
+                yield Button(" 启动网关", id="btn-start-gateway", variant="primary")
             yield ListView(id="model-list")
         with Horizontal(id="model-actions"):
             yield Button(" 模型详情", id="btn-detail", variant="default")
+            yield Button(" 删除模型", id="btn-delete-model", variant="error")
             yield Button(" 添加模型", id="btn-add", variant="primary")
 
     async def on_mount(self) -> None:
@@ -136,7 +145,8 @@ class ModelsPane(Vertical):
         if port is None:
             empty = self.query_one("#empty-state", Static)
             empty.update("网关未运行，请在网关页启动")
-            empty.visible = True
+            self.query_one("#empty-state-container", Container).visible = True
+            self.query_one("#btn-start-gateway", Button).visible = True
             self.query_one("#model-list", ListView).visible = False
             return
         data = await async_get_json(f"http://127.0.0.1:{port}/api/status") or {}
@@ -156,15 +166,17 @@ class ModelsPane(Vertical):
         self.query_one("#active-info", Static).visible = True
 
         # Toggle list-view / empty-state
+        empty_container = self.query_one("#empty-state-container", Container)
         empty = self.query_one("#empty-state", Static)
         list_view = self.query_one("#model-list", ListView)
         await list_view.clear()
         if not self.models:
             empty.update("暂无模型 — 请先在供应商页添加 Provider")
-            empty.visible = True
+            empty_container.visible = True
+            self.query_one("#btn-start-gateway", Button).visible = False
             list_view.visible = False
         else:
-            empty.visible = False
+            empty_container.visible = False
             list_view.visible = True
             for m in self.models:
                 if m["id"] == self.active_model:
@@ -178,20 +190,23 @@ class ModelsPane(Vertical):
     async def on_input_changed(self, event: Input.Changed) -> None:
         """Filter model list by search query."""
         query = event.value.strip().lower()
+        empty_container = self.query_one("#empty-state-container", Container)
         empty = self.query_one("#empty-state", Static)
         list_view = self.query_one("#model-list", ListView)
         await list_view.clear()
         filtered = [m for m in self.models if query in m["id"].lower()] if query else self.models
         if not filtered and query:
             empty.update("无匹配模型")
-            empty.visible = True
+            empty_container.visible = True
+            self.query_one("#btn-start-gateway", Button).visible = False
             list_view.visible = False
         elif not filtered:
             empty.update("暂无模型 — 请先在供应商页添加 Provider")
-            empty.visible = True
+            empty_container.visible = True
+            self.query_one("#btn-start-gateway", Button).visible = False
             list_view.visible = False
         else:
-            empty.visible = False
+            empty_container.visible = False
             list_view.visible = True
             for m in filtered:
                 if m["id"] == self.active_model:
@@ -202,12 +217,18 @@ class ModelsPane(Vertical):
         self._filtered_models = list(filtered) if filtered else []
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-detail":
+        if event.button.id == "btn-start-gateway":
+            daemon = cast("LlmPortApp", self.app).daemon
+            daemon.start()
+            self.notify("网关已启动", title="网关")
+            # Hide start button immediately; next auto-refresh will populate data
+            self.query_one("#btn-start-gateway", Button).visible = False
+            await self.refresh_models()
+        elif event.button.id == "btn-detail":
             list_view = self.query_one("#model-list", ListView)
             if list_view.index is not None and list_view.index < len(self._filtered_models):
                 model = self._filtered_models[list_view.index]
                 daemon = cast("LlmPortApp", self.app).daemon
-                # Fetch full model data via /api/models endpoint
                 port = daemon.get_control_port()
                 bindings = []
                 if port:
@@ -225,8 +246,90 @@ class ModelsPane(Vertical):
                 await _m_app.push_screen(
                     ModelDetailScreen(model_with_bindings, _m_app.daemon)
                 )
+        elif event.button.id == "btn-delete-model":
+            list_view = self.query_one("#model-list", ListView)
+            if list_view.index is not None and list_view.index < len(self._filtered_models):
+                model = self._filtered_models[list_view.index]
+                daemon = cast("LlmPortApp", self.app).daemon
+                port = daemon.get_control_port()
+                if port is None:
+                    self.notify("网关未运行", title="删除模型", severity="error")
+                    return
+                import httpx
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.delete(
+                        f"http://127.0.0.1:{port}/api/models",
+                        json={"model_id": model["id"]},
+                    )
+                    if resp.status_code != 200:
+                        self.notify(f"删除失败", title="删除模型", severity="error")
+                        return
+                self.notify(f"已删除: {model['id']}", title="删除模型")
+                await self.refresh_models()
         elif event.button.id == "btn-add":
             self.notify("在供应商页添加模型别名即可自动关联", title="提示")
+
+    def action_delete_model(self) -> None:
+        """Binding: delete — delete the selected model."""
+        list_view = self.query_one("#model-list", ListView)
+        if list_view.index is not None and list_view.index < len(self._filtered_models):
+            model = self._filtered_models[list_view.index]
+            daemon = cast("LlmPortApp", self.app).daemon
+            port = daemon.get_control_port()
+            if port is None:
+                self.notify("网关未运行", title="删除模型", severity="error")
+                return
+            import asyncio
+            asyncio.ensure_future(self._delete_model_via_api(model["id"], daemon))
+
+    def action_switch_next(self) -> None:
+        """Binding: n — switch to the selected model."""
+        list_view = self.query_one("#model-list", ListView)
+        if list_view.index is not None and list_view.index < len(self._filtered_models):
+            model = self._filtered_models[list_view.index]
+            daemon = cast("LlmPortApp", self.app).daemon
+            port = daemon.get_control_port()
+            if port is None:
+                self.notify("网关未运行", title="模型切换", severity="error")
+                return
+            import asyncio
+            asyncio.ensure_future(self._switch_model_via_api(model["id"], daemon))
+
+    async def _delete_model_via_api(self, model_id: str, daemon: DaemonManager) -> None:
+        """Call DELETE /api/models for the given model_id."""
+        port = daemon.get_control_port()
+        if port is None:
+            self.notify("网关未运行", title="删除模型", severity="error")
+            return
+        import httpx
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.delete(
+                f"http://127.0.0.1:{port}/api/models",
+                json={"model_id": model_id},
+            )
+            if resp.status_code != 200:
+                self.notify(f"删除失败", title="删除模型", severity="error")
+                return
+        self.notify(f"已删除: {model_id}", title="删除模型")
+        await self.refresh_models()
+
+    async def _switch_model_via_api(self, model_id: str, daemon: DaemonManager) -> None:
+        """Call POST /api/models/switch for the given model_id."""
+        port = daemon.get_control_port()
+        if port is None:
+            self.notify("网关未运行", title="模型切换", severity="error")
+            return
+        import httpx
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{port}/api/models/switch",
+                json={"model_id": model_id},
+            )
+            if resp.status_code != 200:
+                self.notify(f"切换失败", title="模型切换", severity="error")
+                return
+        await self.refresh_models()
+        self.notify(f"已切换到: {model_id}", title="模型切换")
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.item is None:

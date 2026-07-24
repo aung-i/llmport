@@ -81,7 +81,7 @@ class TestCreateApp:
             data["active_model"] = "gpt5"
             store.save(data)
             _gw, ctrl = gateway_server.create_app(store)
-            assert len(ctrl.routes) == 9
+            assert len(ctrl.routes) == 10
 
     def test_gateway_route_paths_present(self):
         """Each expected gateway route path is registered."""
@@ -248,3 +248,38 @@ class TestOpenaiModels:
             assert resp.status_code == 200
             body = resp.json()
             assert body["data"] == []
+
+
+class TestControlModelsDelete:
+    """Test the DELETE /api/models endpoint."""
+
+    def test_delete_model_returns_ok(self):
+        """DELETE /api/models with valid model_id returns ok."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(tmp)
+            store.init_first_run()
+            data = store.load()
+            data["providers"].append(_BASE_PROVIDER)
+            data["active_model"] = "gpt5"
+            store.save(data)
+            _gw, ctrl = gateway_server.create_app(store)
+            client = TestClient(ctrl)
+            resp = client.request("DELETE", "/api/models", json={"model_id": "gpt5"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ok"] is True
+
+    def test_delete_model_missing_id_returns_400(self):
+        """DELETE /api/models without model_id returns 400."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(tmp)
+            store.init_first_run()
+            data = store.load()
+            data["providers"].append(_BASE_PROVIDER)
+            store.save(data)
+            _gw, ctrl = gateway_server.create_app(store)
+            client = TestClient(ctrl)
+            resp = client.request("DELETE", "/api/models", json={})
+            assert resp.status_code == 400

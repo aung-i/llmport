@@ -80,6 +80,18 @@ async def control_models(request: Request) -> JSONResponse:
     })
 
 
+async def control_models_delete(request: Request) -> JSONResponse:
+    """Delete a logical model by id."""
+    state = get_state()
+    body = await request.json()
+    model_id = body.get("model_id")
+    if not model_id:
+        return JSONResponse({"ok": False, "error": "Missing model_id"}, status_code=400)
+    state.models = [m for m in state.models if m.id != model_id]
+    state.save()
+    return JSONResponse({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # Providers
 # ---------------------------------------------------------------------------
@@ -105,7 +117,10 @@ async def control_providers(request: Request) -> JSONResponse:
         if raw_key == "***":
             existing = {p.id: p for p in state.providers}
             if body["id"] in existing:
-                body["api_key"] = existing[body["id"]].api_key
+                stored = existing[body["id"]]
+                if body.get("base_url") != stored.base_url:
+                    return JSONResponse({"error": "base_url mismatch"}, status_code=400)
+                body["api_key"] = stored.api_key
         elif raw_key == "":
             # Empty string means "clear the key"
             body["api_key"] = ""
@@ -149,6 +164,17 @@ async def control_providers(request: Request) -> JSONResponse:
 async def control_test_provider(request: Request) -> JSONResponse:
     """Test a provider connection."""
     body = await request.json()
+    # Resolve "***" sentinel — look up real key from stored providers
+    raw_key = body.get("api_key")
+    if raw_key == "***":
+        state = get_state()
+        existing = {p.id: p for p in state.providers}
+        provider_id = body.get("id", "")
+        if provider_id in existing:
+            stored = existing[provider_id]
+            if body.get("base_url") != stored.base_url:
+                return JSONResponse({"error": "base_url mismatch"}, status_code=400)
+            body["api_key"] = stored.api_key
     provider = ProviderConfig.from_dict(body)
     if provider.protocol == "openai":
         t0 = time.monotonic()
@@ -163,6 +189,17 @@ async def control_test_provider(request: Request) -> JSONResponse:
 async def control_fetch_models(request: Request) -> JSONResponse:
     """Fetch model list from a provider."""
     body = await request.json()
+    # Resolve "***" sentinel — look up real key from stored providers
+    raw_key = body.get("api_key")
+    if raw_key == "***":
+        state = get_state()
+        existing = {p.id: p for p in state.providers}
+        provider_id = body.get("id", "")
+        if provider_id in existing:
+            stored = existing[provider_id]
+            if body.get("base_url") != stored.base_url:
+                return JSONResponse({"error": "base_url mismatch"}, status_code=400)
+            body["api_key"] = stored.api_key
     provider = ProviderConfig.from_dict(body)
     if provider.protocol == "openai":
         models, error = await openai_handler.list_models(provider)

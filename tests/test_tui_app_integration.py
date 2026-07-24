@@ -565,3 +565,110 @@ class TestGatewayNotRunningState:
             assert "未运行" in content_text, (
                 f"Stats content should show '未运行', got: {content_text!r}"
             )
+
+
+# ===================================================================
+# TestKeyboardBindings (Bug 4)
+# ===================================================================
+
+class TestKeyboardBindings:
+    """Keyboard shortcuts for tab switching and pane actions."""
+
+    @pytest.mark.asyncio
+    async def test_ctrl_1_switches_to_models(self, mock_deps):
+        """Pressing ctrl+1 switches to the models tab."""
+        from llmport.app import LlmPortApp
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            tabbed = app.query_one(TabbedContent)
+
+            # Switch to a different tab first
+            await pilot.click(f"#{ContentTab.add_prefix('settings')}")
+            await pilot.pause()
+            assert tabbed.active == "settings"
+
+            # Press ctrl+1 to go back to models
+            await pilot.press("ctrl+1")
+            await pilot.pause()
+            assert tabbed.active == "models", (
+                f"Expected 'models', got '{tabbed.active}'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_ctrl_2_switches_to_providers(self, mock_deps):
+        """Pressing ctrl+2 switches to the providers tab."""
+        from llmport.app import LlmPortApp
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            tabbed = app.query_one(TabbedContent)
+
+            await pilot.press("ctrl+2")
+            await pilot.pause()
+            assert tabbed.active == "providers"
+
+    @pytest.mark.asyncio
+    async def test_ctrl_3_switches_to_gateway(self, mock_deps):
+        """Pressing ctrl+3 switches to the gateway tab."""
+        from llmport.app import LlmPortApp
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            tabbed = app.query_one(TabbedContent)
+
+            await pilot.press("ctrl+3")
+            await pilot.pause()
+            assert tabbed.active == "gateway"
+
+    @pytest.mark.asyncio
+    async def test_ctrl_4_switches_to_stats(self, mock_deps):
+        """Pressing ctrl+4 switches to the stats tab."""
+        from llmport.app import LlmPortApp
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            tabbed = app.query_one(TabbedContent)
+
+            await pilot.press("ctrl+4")
+            await pilot.pause()
+            assert tabbed.active == "stats"
+
+    @pytest.mark.asyncio
+    async def test_ctrl_5_switches_to_settings(self, mock_deps):
+        """Pressing ctrl+5 switches to the settings tab."""
+        from llmport.app import LlmPortApp
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            tabbed = app.query_one(TabbedContent)
+
+            await pilot.press("ctrl+5")
+            await pilot.pause()
+            assert tabbed.active == "settings"
+
+    @pytest.mark.asyncio
+    async def test_footer_displays_bindings(self, mock_deps):
+        """Footer shows binding keys for tab switching."""
+        from llmport.app import LlmPortApp
+        from textual.widgets import Footer
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            footer = app.query_one(Footer)
+            assert footer is not None
+            # Check that app-level tab-switching bindings exist
+            bindings = app.BINDINGS
+            binding_keys = [b.key for b in bindings]
+            binding_descriptions = [b.description for b in bindings]
+            assert "ctrl+1" in binding_keys, "ctrl+1 binding should exist in app bindings"
+            assert "ctrl+2" in binding_keys, "ctrl+2 binding should exist in app bindings"
+            assert any(k in binding_descriptions for k in ("模型", "供应商")), (
+                "Tab switching bindings should have Chinese descriptions"
+            )

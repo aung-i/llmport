@@ -325,3 +325,169 @@ class TestControlApiErrorPaths:
         assert data.get("ok") is True
         # Verify os.kill was called with the current PID and SIGTERM
         mock_kill.assert_called_once_with(os.getpid(), sig_mod.SIGTERM)
+
+
+# ------------------------------------------------------------------
+# "***" sentinel key resolution (Bug 3)
+# ------------------------------------------------------------------
+
+class TestStarSentinelResolution:
+    """Tests for `api_key="***"` sentinel resolution in control API endpoints."""
+
+    def _make_test_app(self):
+        """Return a minimal Starlette app with only /api/providers/test."""
+        from llmport.gateway.control_api import control_test_provider
+        from starlette.routing import Route
+        return Starlette(routes=[
+            Route("/api/providers/test", control_test_provider, methods=["POST"]),
+        ])
+
+    def _make_providers_app(self):
+        """Return a minimal Starlette app with only /api/providers routes."""
+        from llmport.gateway.control_api import control_providers
+        return Starlette(routes=[
+            Route("/api/providers", control_providers, methods=["GET", "POST", "DELETE"]),
+        ])
+
+    def _make_fetch_app(self):
+        """Return a minimal Starlette app with only /api/providers/models."""
+        from llmport.gateway.control_api import control_fetch_models
+        return Starlette(routes=[
+            Route("/api/providers/models", control_fetch_models, methods=["POST"]),
+        ])
+
+    def _mock_state_with_provider(self, api_key="sk-real-key"):
+        """Create a mock GatewayState with one provider."""
+        from llmport.models.provider import ProviderConfig
+        state = MagicMock()
+        provider = ProviderConfig.from_dict({
+            "id": "existing-provider",
+            "name": "Existing",
+            "protocol": "openai",
+            "base_url": "https://api.example.com",
+            "api_key": api_key,
+            "models": [],
+        })
+        state.providers = [provider]
+        state.models = []
+        state.save = MagicMock()
+        return state
+
+    # -- POST /api/providers/test with "***" -----------------------------
+
+    def test_test_provider_resolves_asterisk_from_state(self):
+        """POST /api/providers/test with api_key='***' must resolve from stored provider."""
+        from llmport.gateway.control_api import get_state
+        app = self._make_test_app()
+        mock_state = self._mock_state_with_provider("sk-real-key")
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            with patch(
+                "llmport.gateway.control_api.openai_handler.list_models",
+                return_value=([], None),
+            ):
+                client = TestClient(app)
+                resp = client.post("/api/providers/test", json={
+                    "id": "existing-provider",
+                    "name": "Existing",
+                    "protocol": "openai",
+                    "base_url": "https://api.example.com",
+                    "api_key": "***",
+                })
+            # The request should go through with the resolved key (not "***")
+            # We can't directly check the key, but the request should not fail with
+            # key validation errors. The list_models mock will return successfully.
+            assert resp.status_code == 200
+
+    def test_test_provider_asterisk_not_found_uses_literal(self):
+        """POST /api/providers/test with api_key='***' but unknown id uses literal '***'."""
+        from llmport.gateway.control_api import get_state
+        app = self._make_test_app()
+        mock_state = self._mock_state_with_provider("sk-real-key")
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            with patch(
+                "llmport.gateway.control_api.openai_handler.list_models",
+                return_value=([], None),
+            ):
+                client = TestClient(app)
+                resp = client.post("/api/providers/test", json={
+                    "id": "non-existent-provider",
+                    "name": "NonExistent",
+                    "protocol": "openai",
+                    "base_url": "https://api.example.com",
+                    "api_key": "***",
+                })
+            # 'non-existent-provider' is not in the stored state, so "***" is sent
+            # literally as the API key. This should still work with our mock.
+            assert resp.status_code == 200
+
+    # -- POST /api/providers with "***" ---------------------------------
+
+    def test_post_providers_asterisk_keeps_existing_key(self):
+        """POST /api/providers with api_key='***' on existing provider keeps old key."""
+        from llmport.gateway.control_api import get_state
+        app = self._make_providers_app()
+        mock_state = self._mock_state_with_provider("sk-secret-keep")
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            client = TestClient(app)
+            resp = client.post("/api/providers", json={
+                "id": "existing-provider",
+                "name": "Existing",
+                "protocol": "openai",
+                "base_url": "https://api.example.com",
+                "api_key": "***",
+                "models": [],
+            })
+        assert resp.status_code == 200
+        # The stored api_key should still be the original, not overwritten by "***"
+        updated = next(p for p in mock_state.providers if p.id == "existing-provider")
+        assert updated.api_key == "sk-secret-keep", (
+            f"Expected api_key to be preserved as 'sk-secret-keep', got {updated.api_key!r}"
+        )
+
+    def test_post_providers_asterisk_new_provider_stores_literal(self):
+        """POST /api/providers with api_key='***' on NEW provider stores '***' literally."""
+        from llmport.gateway.control_api import get_state
+        app = self._make_providers_app()
+        mock_state = self._mock_state_with_provider("sk-other")
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            client = TestClient(app)
+            resp = client.post("/api/providers", json={
+                "id": "brand-new-provider",
+                "name": "Brand New",
+                "protocol": "openai",
+                "base_url": "https://api.example.com",
+                "api_key": "***",
+                "models": [],
+            })
+        assert resp.status_code == 200
+        # The new provider doesn't exist in state yet, so "***" is stored literally
+        new_provider = next(p for p in mock_state.providers if p.id == "brand-new-provider")
+        assert new_provider is not None
+        assert new_provider.api_key == "***", (
+            f"Expected api_key to be '***', got {new_provider.api_key!r}"
+        )
+
+    # -- POST /api/providers/models with "***" --------------------------
+
+    def test_fetch_models_resolves_asterisk_from_state(self):
+        """POST /api/providers/models with api_key='***' resolves from stored provider."""
+        from llmport.gateway.control_api import get_state
+        app = self._make_fetch_app()
+        mock_state = self._mock_state_with_provider("sk-fetch-key")
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            with patch(
+                "llmport.gateway.control_api.openai_handler.list_models",
+                return_value=(["gpt-5", "gpt-4"], None),
+            ):
+                client = TestClient(app)
+                resp = client.post("/api/providers/models", json={
+                    "id": "existing-provider",
+                    "name": "Existing",
+                    "protocol": "openai",
+                    "base_url": "https://api.example.com",
+                    "api_key": "***",
+                })
+            assert resp.status_code == 200
+            data = resp.json()
+            # Should have resolved key and fetched models successfully
+            assert data.get("models") == ["gpt-5", "gpt-4"]

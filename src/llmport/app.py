@@ -49,6 +49,11 @@ class LlmPortApp(App):
         Binding("ctrl+p", "screenshot", "", show=False),
         Binding("f9", "maximize", "", show=False),
         Binding("ctrl+t", "toggle_dark", "", show=False),
+        Binding("ctrl+1", "switch_tab('models')", "模型", show=True),
+        Binding("ctrl+2", "switch_tab('providers')", "供应商", show=True),
+        Binding("ctrl+3", "switch_tab('gateway')", "网关", show=True),
+        Binding("ctrl+4", "switch_tab('stats')", "统计", show=True),
+        Binding("ctrl+5", "switch_tab('settings')", "设置", show=True),
     ]
 
     def __init__(self):
@@ -91,6 +96,10 @@ class LlmPortApp(App):
             await self.query_one(ModelsPane).refresh_models()
         except Exception:
             pass
+
+    def action_switch_tab(self, tab_id: str) -> None:
+        """Switch to the specified tab by id."""
+        self.query_one(TabbedContent).active = tab_id
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
