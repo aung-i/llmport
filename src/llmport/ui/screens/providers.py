@@ -17,6 +17,66 @@ from llmport.ui import async_get_json
 from llmport.ui.widgets import Section
 
 
+class FetchModelsScreen(ModalScreen):
+    """Modal for previewing fetched models before applying (replace/append/cancel)."""
+
+    CSS = """
+    FetchModelsScreen {
+        align: center middle;
+    }
+    #fetch-container {
+        width: 60;
+        height: auto;
+        min-height: 18;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #fetch-preview {
+        height: 10;
+        overflow-y: auto;
+        border: solid $secondary;
+        margin: 1 0;
+        padding: 0 1;
+    }
+    #fetch-actions {
+        align: center middle;
+        margin-top: 1;
+    }
+    Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, fetched_models: list[str], existing_models_text: str) -> None:
+        super().__init__()
+        self.fetched_models = fetched_models
+        self.existing_models_text = existing_models_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="fetch-container"):
+            yield Static(f"[bold $primary]拉取到 {len(self.fetched_models)} 个模型[/]", id="fetch-title")
+            yield Label("[dim]预览:[/]")
+            preview_text = "\n".join(self.fetched_models[:50])
+            yield Static(preview_text, id="fetch-preview")
+            if len(self.fetched_models) > 50:
+                yield Label(f"[dim]...以及 {len(self.fetched_models) - 50} 个更多模型[/]")
+            if self.existing_models_text.strip():
+                yield Label("[warning]当前已输入模型内容将被替换或合并[/]", id="fetch-warning")
+            with Horizontal(id="fetch-actions"):
+                yield Button(" 替换", id="btn-replace", variant="primary")
+                yield Button(" 追加", id="btn-append", variant="default")
+                yield Button(" 取消", id="btn-cancel-fetch")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-replace":
+            self.dismiss(("replace", self.fetched_models))
+        elif event.button.id == "btn-append":
+            self.dismiss(("append", self.fetched_models))
+        elif event.button.id == "btn-cancel-fetch":
+            self.dismiss(None)
+
+
 class ProviderFormScreen(ModalScreen):
     """Modal for adding or editing a provider."""
 
@@ -69,6 +129,7 @@ class ProviderFormScreen(ModalScreen):
                     id="input-key",
                 )
                 yield Button(" 清空", id="btn-clear-key", variant="error")
+                yield Button(" 👁", id="btn-toggle-key", variant="default")
             yield Label("[dim]地址[/]")
             yield Input(
                 value=self.provider.get("base_url", "") if self.provider else "",
@@ -111,6 +172,13 @@ class ProviderFormScreen(ModalScreen):
             self.query_one("#input-key", Input).value = ""
             self._key_cleared = True
             self.notify("API Key 已清空 — 保存后将清除密钥", title="API Key")
+            return
+
+        if event.button.id == "btn-toggle-key":
+            key_input = self.query_one("#input-key", Input)
+            key_input.password = not key_input.password
+            btn = event.button
+            btn.label = " 👁" if key_input.password else " 🙈"
             return
 
         name = self.query_one("#input-name", Input).value
@@ -156,27 +224,8 @@ class ProviderFormScreen(ModalScreen):
             return
 
         if event.button.id == "btn-fetch":
-            provider_id = name.lower().replace(" ", "-")
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"http://127.0.0.1:{port}/api/providers/models",
-                    json={
-                        "id": provider_id,
-                        "name": name,
-                        "protocol": protocol,
-                        "base_url": url,
-                        "api_key": key,
-                        "models": [],
-                    },
-                )
-                result = resp.json()
-                models_data = result.get("models")
-                if models_data:
-                    names = [m.get("id", "") for m in models_data]
-                    self.query_one("#input-models", Input).value = "\n".join(names[:50])
-                    self.notify(f"找到 {len(models_data)} 个模型", title="模型列表")
-                else:
-                    self.notify(f"获取失败: {result.get('error', '')}", title="模型列表", severity="error")
+            self.query_one("#btn-fetch", Button).disabled = True
+            self.run_worker(self._handle_fetch(), exclusive=True, name="fetch-models")
             return
 
         if event.button.id == "btn-save":
@@ -200,6 +249,79 @@ class ProviderFormScreen(ModalScreen):
             self.notify(f"已保存: {name}", title="供应商")
             self.dismiss()
             await cast("LlmPortApp", self.app).query_one(ProvidersPane).refresh_providers()
+
+    def _apply_fetched_models(self, result: tuple | None) -> None:
+        """Callback from FetchModelsScreen: apply replace/append/cancel to models input."""
+        if result is None:
+            return  # cancelled
+        action, models = result
+        input_widget = self.query_one("#input-models", Input)
+        current = input_widget.value
+        if action == "replace":
+            input_widget.value = "\n".join(models[:50])
+        elif action == "append":
+            existing_lines = [line.strip() for line in current.split("\n") if line.strip()]
+            existing_names = set()
+            for line in existing_lines:
+                name = line.split(",")[0].strip()
+                if name:
+                    existing_names.add(name)
+            new_lines = [m for m in models if m not in existing_names]
+            combined = existing_lines + new_lines
+            input_widget.value = "\n".join(combined[:50])
+
+    async def _handle_fetch(self) -> None:
+        """Worker coroutine: fetch models from API, then show preview modal."""
+        try:
+            name = self.query_one("#input-name", Input).value
+            raw_key = self.query_one("#input-key", Input).value
+            url = self.query_one("#input-url", Input).value
+            protocol = self.query_one("#select-protocol", Select).value
+
+            if self._key_cleared:
+                key = ""
+            elif raw_key:
+                key = raw_key
+            else:
+                key = "***" if self.is_edit else ""
+
+            port = self.daemon.get_control_port()
+            if port is None:
+                self.notify("网关未运行，请先启动网关", title="错误", severity="error")
+                return
+
+            provider_id = name.lower().replace(" ", "-")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/api/providers/models",
+                    json={
+                        "id": provider_id,
+                        "name": name,
+                        "protocol": protocol,
+                        "base_url": url,
+                        "api_key": key,
+                        "models": [],
+                    },
+                )
+                result = resp.json()
+                models_data = result.get("models")
+                if not models_data:
+                    self.notify(f"获取失败: {result.get('error', '')}", title="模型列表", severity="error")
+                    return
+                fetched = [m["id"] for m in models_data if m.get("id")]
+                existing = self.query_one("#input-models", Input).value
+                await self.app.push_screen(
+                    FetchModelsScreen(fetched, existing),
+                    self._apply_fetched_models,
+                )
+        except Exception as e:
+            self.notify(f"拉取失败: {e}", title="错误", severity="error")
+        finally:
+            self._restore_fetch_button()
+
+    def _restore_fetch_button(self) -> None:
+        """Re-enable the fetch button after worker completes."""
+        self.query_one("#btn-fetch", Button).disabled = False
 
 
 class ProvidersPane(Vertical):

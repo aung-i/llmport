@@ -305,7 +305,7 @@ async def test_on_button_pressed_btn_test_error():
 
 @pytest.mark.asyncio
 async def test_on_button_pressed_btn_fetch_success():
-    """Fetch-models button: populates models input from API response."""
+    """Fetch-models button: pushes FetchModelsScreen via worker with fetched models."""
     daemon = MagicMock(spec=DaemonManager)
     daemon.get_control_port.return_value = 12345
 
@@ -335,24 +335,166 @@ async def test_on_button_pressed_btn_fetch_success():
             }
             mock_client.post = AsyncMock(return_value=mock_resp)
 
-            with patch.object(form, "notify") as mock_notify:
-                await pilot.click("#btn-fetch")
-                await pilot.pause()
+            await pilot.click("#btn-fetch")
+            await pilot.pause()
 
-                # Models input should be populated
-                model_input = form.query_one("#input-models", Input)
-                assert "claude-opus-4-8" in model_input.value
-                assert "claude-sonnet-4-8" in model_input.value
-                assert "claude-haiku" in model_input.value
+            # FetchModelsScreen should now be the current screen (not directly modified)
+            from llmport.ui.screens.providers import FetchModelsScreen
+            assert isinstance(pilot.app.screen, FetchModelsScreen), (
+                f"Expected FetchModelsScreen, got {type(pilot.app.screen)}"
+            )
 
-                mock_notify.assert_called_once()
-                msg = mock_notify.call_args[0][0]
-                assert "找到" in msg
+            # Models input in the background form should NOT be modified yet
+            assert form.query_one("#input-models", Input).value == "", (
+                "Models input should not be modified until user chooses replace/append"
+            )
 
-                # Verify URL
-                mock_client.post.assert_called_once()
-                call_url = mock_client.post.call_args[0][0]
-                assert "/api/providers/models" in call_url
+            # Fetch button should be re-enabled (worker's finally block)
+            assert form.query_one("#btn-fetch", Button).disabled is False
+
+            # Verify the fetch modal shows the correct model names
+            fetch_screen = pilot.app.screen
+            preview = fetch_screen.query_one("#fetch-preview", Static)
+            preview_text = str(preview.render())
+            assert "claude-opus-4-8" in preview_text
+            assert "claude-sonnet-4-8" in preview_text
+            assert "claude-haiku" in preview_text
+
+            # Verify URL was called correctly
+            mock_client.post.assert_called_once()
+            call_url = mock_client.post.call_args[0][0]
+            assert "/api/providers/models" in call_url
+
+            # Now click "replace" in the modal to complete the flow
+            await pilot.click("#btn-replace")
+            await pilot.pause()
+
+            # Back to ProviderFormScreen, models input should now be populated
+            assert isinstance(pilot.app.screen, ProviderFormScreen)
+            assert "claude-opus-4-8" in form.query_one("#input-models", Input).value
+
+
+@pytest.mark.asyncio
+async def test_on_button_pressed_btn_fetch_empty_ids():
+    """Fetch-models button: API returns models without 'id' field; empty strings handled."""
+    daemon = MagicMock(spec=DaemonManager)
+    daemon.get_control_port.return_value = 12345
+
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        form.query_one("#input-name", Input).value = "TestProv"
+        form.query_one("#input-url", Input).value = "https://example.com"
+        form.query_one("#input-key", Input).value = "sk-xxx"
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+            # Models without "id" key — m.get("id", "") yields empty strings
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "models": [
+                    {"name": "no-id-1"},
+                    {"id": "valid-model"},
+                    {"name": "no-id-2"},
+                ],
+            }
+            mock_client.post = AsyncMock(return_value=mock_resp)
+
+            await pilot.click("#btn-fetch")
+            await pilot.pause()
+
+            from llmport.ui.screens.providers import FetchModelsScreen
+            assert isinstance(pilot.app.screen, FetchModelsScreen)
+
+            # Models without "id" are filtered out by the `if m.get("id")` guard
+            fetch_screen = pilot.app.screen
+            assert fetch_screen.fetched_models == ["valid-model"], (
+                f"Expected ['valid-model'], got {fetch_screen.fetched_models!r}"
+            )
+
+
+# -- toggle-key ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_btn_toggle_key_initial_state():
+    """Toggle-key button starts with eye icon and password is hidden."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        toggle_btn = form.query_one("#btn-toggle-key", Button)
+        assert toggle_btn is not None
+        assert "👁" in str(toggle_btn.label), (
+            f"Expected eye emoji in label, got {toggle_btn.label}"
+        )
+
+        key_input = form.query_one("#input-key", Input)
+        assert key_input.password is True, "Key input should be password-masked initially"
+
+
+@pytest.mark.asyncio
+async def test_btn_toggle_key_toggles_password():
+    """Toggle-key button toggles the password property of the key input."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        toggle_btn = form.query_one("#btn-toggle-key", Button)
+        key_input = form.query_one("#input-key", Input)
+
+        # Initial: password hidden
+        assert key_input.password is True
+
+        # Click 1: password revealed
+        await form.on_button_pressed(Button.Pressed(toggle_btn))
+        assert key_input.password is False
+
+        # Click 2: password hidden again
+        await form.on_button_pressed(Button.Pressed(toggle_btn))
+        assert key_input.password is True
+
+
+@pytest.mark.asyncio
+async def test_btn_toggle_key_toggles_label():
+    """Toggle-key button label changes between eye and see-no-evil emoji."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        toggle_btn = form.query_one("#btn-toggle-key", Button)
+
+        # Initial: eye (password hidden, click to show)
+        assert "👁" in str(toggle_btn.label)
+
+        # Click 1: see-no-evil (password shown, click to hide)
+        await form.on_button_pressed(Button.Pressed(toggle_btn))
+        assert "🙈" in str(toggle_btn.label)
+
+        # Click 2: eye again
+        await form.on_button_pressed(Button.Pressed(toggle_btn))
+        assert "👁" in str(toggle_btn.label)
 
 
 @pytest.mark.asyncio
@@ -428,6 +570,320 @@ async def test_on_button_pressed_btn_fetch_none_stays_open():
                 assert form.query_one("#input-models", Input).value == ""
                 mock_notify.assert_called_once()
                 assert "获取失败" in mock_notify.call_args[0][0]
+
+
+# ===================================================================
+# FetchModelsScreen tests
+# ===================================================================
+
+class _FetchScreenHost(App):
+    """Minimal Textual app to host FetchModelsScreen as a modal."""
+
+    def __init__(self, fetched_models: list[str], existing_text: str = ""):
+        super().__init__()
+        self.fetched_models = fetched_models
+        self.existing_text = existing_text
+        self.dismiss_result = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("dummy")
+
+    def _capture_result(self, result: tuple | None) -> None:
+        self.dismiss_result = result
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_compose_empty_existing():
+    """FetchModelsScreen compose: no warning when existing_models_text is empty."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    models = ["claude-opus-4-8", "claude-sonnet-4-8", "claude-haiku"]
+    app = _FetchScreenHost(models, existing_text="")
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, ""),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        screen = pilot.app.screen
+        assert isinstance(screen, FetchModelsScreen)
+
+        # Title shows correct count
+        title = screen.query_one("#fetch-title", Static)
+        assert "3 个模型" in str(title.render())
+
+        # Preview shows model names
+        preview = screen.query_one("#fetch-preview", Static)
+        preview_text = str(preview.render())
+        assert "claude-opus-4-8" in preview_text
+        assert "claude-sonnet-4-8" in preview_text
+        assert "claude-haiku" in preview_text
+
+        # No warning label when existing text is empty
+        with pytest.raises(Exception):
+            screen.query_one("#fetch-warning")
+
+        # Three action buttons present
+        assert screen.query_one("#btn-replace", Button) is not None
+        assert screen.query_one("#btn-append", Button) is not None
+        assert screen.query_one("#btn-cancel-fetch", Button) is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_compose_with_existing():
+    """FetchModelsScreen compose: shows warning when existing_models_text is non-empty."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    models = ["gpt-5"]
+    app = _FetchScreenHost(models, existing_text="some existing models")
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, "some existing models"),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        screen = pilot.app.screen
+        assert isinstance(screen, FetchModelsScreen)
+
+        # Warning label is present
+        warning = screen.query_one("#fetch-warning", Label)
+        assert warning is not None
+        assert "替换或合并" in str(warning.render())
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_compose_many_models():
+    """FetchModelsScreen compose: >50 models truncated with '更多模型' note."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    models = [f"model-{i}" for i in range(75)]
+    app = _FetchScreenHost(models)
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, ""),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        screen = pilot.app.screen
+        assert isinstance(screen, FetchModelsScreen)
+
+        # Preview shows first 50 models
+        preview = screen.query_one("#fetch-preview", Static)
+        preview_text = str(preview.render())
+        assert "model-0" in preview_text
+        assert "model-49" in preview_text
+        assert "model-50" not in preview_text  # truncated
+
+        # Extra note about remaining models
+        extra_notes = list(screen.query(Label))
+        note_found = any("更多模型" in str(n.render()) for n in extra_notes)
+        assert note_found, "Expected '更多模型' note for >50 models"
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_compose_empty_id_models():
+    """FetchModelsScreen compose: models with missing 'id' key produce blank lines."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    # Simulate API models without "id" field (regression: m.get("id", "") yields "")
+    models = ["", "valid-model", ""]
+    app = _FetchScreenHost(models)
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, ""),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        screen = pilot.app.screen
+        assert isinstance(screen, FetchModelsScreen)
+
+        # Preview has 3 lines (two blank, one valid)
+        preview = screen.query_one("#fetch-preview", Static)
+        preview_text = str(preview.render())
+        lines = preview_text.split("\n")
+        assert len(lines) == 3
+        assert lines[0] == ""
+        assert lines[1] == "valid-model"
+        assert lines[2] == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_replace():
+    """FetchModelsScreen: replace button dismisses with (\"replace\", models)."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    models = ["model-a", "model-b"]
+    app = _FetchScreenHost(models)
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, ""),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        await pilot.click("#btn-replace")
+        await pilot.pause()
+
+        assert app.dismiss_result == ("replace", models)
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_append():
+    """FetchModelsScreen: append button dismisses with (\"append\", models)."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    models = ["model-a", "model-b"]
+    app = _FetchScreenHost(models)
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, ""),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        await pilot.click("#btn-append")
+        await pilot.pause()
+
+        assert app.dismiss_result == ("append", models)
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_screen_cancel():
+    """FetchModelsScreen: cancel button dismisses with None."""
+    from llmport.ui.screens.providers import FetchModelsScreen
+
+    models = ["model-a"]
+    app = _FetchScreenHost(models)
+    async with app.run_test(size=(60, 30)) as pilot:
+        await pilot.app.push_screen(
+            FetchModelsScreen(models, ""),
+            app._capture_result,
+        )
+        await pilot.pause()
+
+        await pilot.click("#btn-cancel-fetch")
+        await pilot.pause()
+
+        assert app.dismiss_result is None
+
+
+# ===================================================================
+# _apply_fetched_models tests
+# ===================================================================
+
+def _apply_fetched_models(form: ProviderFormScreen, result: tuple | None) -> None:
+    """Safely invoke the (potentially async) _apply_fetched_models callback."""
+    form._apply_fetched_models(result)
+
+
+@pytest.mark.asyncio
+async def test_apply_fetched_models_replace():
+    """_apply_fetched_models(\"replace\", ...) replaces models input entirely."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        models_input = form.query_one("#input-models", Input)
+        models_input.value = "old-model"
+
+        form._apply_fetched_models(("replace", ["new-a", "new-b"]))
+
+        assert models_input.value == "new-a\nnew-b"
+
+
+@pytest.mark.asyncio
+async def test_apply_fetched_models_append_empty():
+    """_apply_fetched_models(\"append\", ...) to empty input sets models."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        models_input = form.query_one("#input-models", Input)
+        models_input.value = ""
+
+        form._apply_fetched_models(("append", ["model-a", "model-b"]))
+
+        assert models_input.value == "model-a\nmodel-b"
+
+
+@pytest.mark.asyncio
+async def test_apply_fetched_models_append_with_dedup():
+    """_apply_fetched_models(\"append\", ...) skips duplicates."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        models_input = form.query_one("#input-models", Input)
+        # Existing has: "model-a" (model-a already there), "model-c"
+        models_input.value = "model-a\nmodel-c"
+
+        # Append with: model-c (already exists as name), model-b (new)
+        form._apply_fetched_models(("append", ["model-c", "model-b"]))
+
+        # Result should: keep original order, append new non-duplicates
+        assert models_input.value == "model-a\nmodel-c\nmodel-b"
+
+
+@pytest.mark.asyncio
+async def test_apply_fetched_models_append_comma_parsing():
+    """_apply_fetched_models(\"append\", ...) dedup checks only first element after comma split."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        models_input = form.query_one("#input-models", Input)
+        # Existing has "model-a,alias-one" (name = "model-a")
+        models_input.value = "model-a,alias-one"
+
+        # Append with "model-a" (same name, should be deduped)
+        form._apply_fetched_models(("append", ["model-a", "model-b"]))
+
+        # "model-a" is already present (from comma line), so only "model-b" added
+        assert models_input.value == "model-a,alias-one\nmodel-b"
+
+
+@pytest.mark.asyncio
+async def test_apply_fetched_models_cancel():
+    """_apply_fetched_models(None) does not modify models input."""
+    daemon = MagicMock(spec=DaemonManager)
+    app = _FormApp(daemon)
+    async with app.run_test(size=_FORM_SIZE) as pilot:
+        await pilot.app.push_screen(ProviderFormScreen(daemon))
+        await pilot.pause()
+
+        form = pilot.app.screen
+        assert isinstance(form, ProviderFormScreen)
+
+        models_input = form.query_one("#input-models", Input)
+        models_input.value = "keep-me"
+
+        form._apply_fetched_models(None)
+
+        assert models_input.value == "keep-me"
 
 
 # -- save -----------------------------------------------------------
