@@ -33,6 +33,10 @@ class LlmPortApp(App):
     Screen { background: $background; }
     Header { dock: top; }
     Footer { dock: bottom; }
+
+    TabbedContent { height: 1fr; }
+    TabPane { height: 1fr; }
+
     .status-up { color: $success; }
     .status-degraded { color: $warning; }
     .status-down { color: $error; }
@@ -60,8 +64,8 @@ class LlmPortApp(App):
     async def on_mount(self) -> None:
         """On mount: check for first-run, push onboarding if needed.
 
-        Auto-starts the daemon if providers already exist so the user
-        sees live data immediately without manual gateway start.
+        Restarts the daemon if providers already exist so the user
+        sees live data with the latest code.
         """
         from llmport.config.store import ConfigStore
 
@@ -77,11 +81,13 @@ class LlmPortApp(App):
         if first_run:
             self.push_screen(OnboardingScreen(), self._on_onboarding_done)
         else:
-            # Providers exist — auto-start daemon so panes show live data
-            if not self.daemon.is_running():
+            # Restart daemon to ensure latest code (even if already running)
+            if self.daemon.is_running():
+                self.daemon.restart()
+            else:
                 self.daemon.start()
-                import asyncio
-                await asyncio.sleep(1.0)
+            import asyncio
+            await asyncio.sleep(1.5)
             try:
                 await self.query_one(ModelsPane).refresh_models()
             except Exception:
