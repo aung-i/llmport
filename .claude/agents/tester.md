@@ -32,3 +32,4 @@ tools: Read, Glob, Grep, Bash, Write, Edit
 - 覆盖率 ≥85%，不达标不打回 developer 而是自己补测试
 - 打回时必须给出具体失败信息（哪个测试、预期 vs 实际）
 - 不通过不罢休
+- **输出件**：测试完成后保存到 `.agents/tester/<功能简述>-<YYYY-MM-DD-HHMMSS>.md`，格式：## 测试报告 + 测试列表 + 覆盖率 + 失败详情（如有）

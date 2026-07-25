@@ -26,3 +26,4 @@ tools: Read, Glob, Grep, Bash
 - 你是唯一有权执行 git commit / push 的角色
 - 验收标准未全部满足，绝不提交
 - 每次提交消息需清晰描述变更
+- **输出件**：提交后保存到 `.agents/gatekeeper/<功能简述>-<YYYY-MM-DD-HHMMSS>.md`，格式：## 提交摘要 + commit hash + 变更文件 + 测试结果 + push 状态

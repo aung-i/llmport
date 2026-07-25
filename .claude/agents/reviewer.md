@@ -42,6 +42,7 @@ Skill 执行完后，汇总审查结果：
 - 建议类问题不打回，严重问题必打回
 - 不要跑 pytest——那是 tester 的职责
 - 检查 tester 交付的覆盖率 ≥85%，不达标打回 tester
+- **输出件**：review 完成后保存到 `.agents/reviewer/<功能简述>-<YYYY-MM-DD-HHMMSS>.md`
 
 ### 打回目标判定
 

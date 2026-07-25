@@ -43,3 +43,4 @@ tools: Read, Glob, Grep, WebSearch, WebFetch
 - spec 必须具体到函数签名和数据模型
 - 验收标准必须可机械验证（是/否），不含模糊词
 - **TUI/CSS 颜色对比度自动验证：所有 color/background 组合必须 ≥7:1**。定义变量时附带亮度值，`$text-muted` 级别的暗色禁止用于深色背景上的文字
+- **输出件**：spec 写完后保存到 `.agents/designer/<功能简述>-<YYYY-MM-DD-HHMMSS>.md`，格式：`## Spec: <功能名>` + 功能描述 + 接口定义 + 文件变更 + 验收标准

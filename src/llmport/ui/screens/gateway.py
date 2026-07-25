@@ -131,7 +131,6 @@ class GatewayPane(Vertical):
             self.query_one("#btn-start-gateway", Button).display = True
             self.query_one("#btn-stop-gateway", Button).display = False
             self.query_one("#btn-restart-gateway", Button).display = False
-            self.query_one("#btn-start-gateway", Button).focus()
             return
 
         config = {"host": "127.0.0.1", "port": 11434}

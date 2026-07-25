@@ -346,7 +346,6 @@ class ProvidersPane(Vertical):
     async def on_mount(self) -> None:
         self.set_interval(10.0, self.refresh_providers)
         await self.refresh_providers()
-        self.query_one("#provider-list", ListView).focus()
 
     async def refresh_providers(self) -> None:
         daemon = cast("LlmPortApp", self.app).daemon

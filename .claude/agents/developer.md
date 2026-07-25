@@ -22,3 +22,4 @@ tools: Read, Glob, Grep, Bash, Write, Edit, LSP
 - 不可偏离 spec 自行发挥
 - 不可自行 commit
 - 打回后优先修复，不可争论
+- **输出件**：实现完成后保存到 `.agents/developer/<功能简述>-<YYYY-MM-DD-HHMMSS>.md`，格式：## 实现总结 + 改动文件 + 验收标准逐条勾选 + 测试结果
