@@ -107,6 +107,7 @@ class ModelsPane(Vertical):
 
     BINDINGS = [
         Binding("delete", "delete_model", "删除", show=True),
+        Binding("backspace", "delete_model", "", show=False),
         Binding("n", "switch_next", "切换", show=True),
     ]
 
@@ -133,6 +134,7 @@ class ModelsPane(Vertical):
     async def on_mount(self) -> None:
         self.set_interval(5.0, self.refresh_models)
         await self.refresh_models()
+        self.query_one("#model-list", ListView).focus()
 
     async def refresh_models(self) -> None:
         daemon = cast("LlmPortApp", self.app).daemon

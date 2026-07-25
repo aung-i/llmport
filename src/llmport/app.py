@@ -49,11 +49,6 @@ class LlmPortApp(App):
         Binding("ctrl+p", "screenshot", "", show=False),
         Binding("f9", "maximize", "", show=False),
         Binding("ctrl+t", "toggle_dark", "", show=False),
-        Binding("ctrl+1", "switch_tab('models')", "模型", show=True),
-        Binding("ctrl+2", "switch_tab('providers')", "供应商", show=True),
-        Binding("ctrl+3", "switch_tab('gateway')", "网关", show=True),
-        Binding("ctrl+4", "switch_tab('stats')", "统计", show=True),
-        Binding("ctrl+5", "switch_tab('settings')", "设置", show=True),
     ]
 
     def __init__(self):
@@ -65,9 +60,8 @@ class LlmPortApp(App):
     async def on_mount(self) -> None:
         """On mount: check for first-run, push onboarding if needed.
 
-        The daemon is NOT auto-started here.  It is started either by the
-        onboarding completion flow or when the user explicitly starts it
-        via the gateway tab.
+        Auto-starts the daemon if providers already exist so the user
+        sees live data immediately without manual gateway start.
         """
         from llmport.config.store import ConfigStore
 
@@ -82,6 +76,16 @@ class LlmPortApp(App):
 
         if first_run:
             self.push_screen(OnboardingScreen(), self._on_onboarding_done)
+        else:
+            # Providers exist — auto-start daemon so panes show live data
+            if not self.daemon.is_running():
+                self.daemon.start()
+                import asyncio
+                await asyncio.sleep(1.0)
+            try:
+                await self.query_one(ModelsPane).refresh_models()
+            except Exception:
+                pass
 
     async def _on_onboarding_done(self, _result=None) -> None:
         """Called when the onboarding screen is dismissed.
@@ -96,10 +100,6 @@ class LlmPortApp(App):
             await self.query_one(ModelsPane).refresh_models()
         except Exception:
             pass
-
-    def action_switch_tab(self, tab_id: str) -> None:
-        """Switch to the specified tab by id."""
-        self.query_one(TabbedContent).active = tab_id
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
