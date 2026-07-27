@@ -1,7 +1,7 @@
 """Tests for protocol handlers. Uses httpx mock or simple unit checks."""
 
 import pytest
-from llmport.models.provider import ProviderConfig, ProviderModel
+from llmport.models.provider import ProviderConfig
 
 
 def make_provider(id: str = "test") -> ProviderConfig:
@@ -11,7 +11,6 @@ def make_provider(id: str = "test") -> ProviderConfig:
         protocol="openai",
         base_url="https://api.example.com",
         api_key="sk-test",
-        models=[ProviderModel(name="gpt-5", aliases=["gpt5"])],
     )
 
 

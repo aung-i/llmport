@@ -1,4 +1,10 @@
-"""Daemon lifecycle management for the gateway server."""
+"""Daemon lifecycle management for the gateway server.
+
+The gateway runs as a background subprocess serving a single Starlette app
+on one loopback port. Both the protocol-forwarding routes (``/openai/v1/*``,
+``/anthropic/v1/*``, ``/v1/*``) and the control API (``/api/*``) live on that
+same port, so there is no separate control port to discover.
+"""
 
 import os
 import time
@@ -9,50 +15,71 @@ from pathlib import Path
 
 import httpx
 
+from llmport.config.store import ConfigStore
+
+DEFAULT_PORT = 11434
+
+# How long start() waits for the gateway to answer /api/status before giving up.
+_START_TIMEOUT_SECONDS = 10.0
+
 
 class DaemonManager:
-    """Manages the gateway daemon process lifecycle.
-
-    The TUI uses this to start, stop, and check the status of the gateway daemon.
-    """
+    """Manages the gateway daemon process lifecycle."""
 
     def __init__(self, config_dir: str | None = None):
-        if config_dir:
-            self.dir = Path(config_dir)
-        else:
-            xdg = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
-            self.dir = Path(xdg) / "llmport"
+        self.store = ConfigStore(config_dir)
+        self.dir = self.store.dir
         self.pid_path = self.dir / "daemon.pid"
+
+    # ------------------------------------------------------------------
+    # PID file helpers
+    # ------------------------------------------------------------------
+
+    def _read_pid_field(self, field: str):
+        if not self.pid_path.exists():
+            return None
+        try:
+            return json.loads(self.pid_path.read_text()).get(field)
+        except (json.JSONDecodeError, ValueError, OSError):
+            return None
+
+    def _gateway_port(self) -> int:
+        """Best-effort gateway port: PID file, then config, then default."""
+        port = self._read_pid_field("port")
+        if port:
+            return int(port)
+        try:
+            gw = self.store.load_config().get("gateway") or {}
+            return int(gw.get("port", DEFAULT_PORT))
+        except Exception:
+            return DEFAULT_PORT
+
+    # ------------------------------------------------------------------
+    # State
+    # ------------------------------------------------------------------
 
     def is_running(self) -> bool:
         """Check if the daemon is currently running."""
-        if not self.pid_path.exists():
+        pid = self._read_pid_field("pid")
+        if pid is None:
             return False
         try:
-            data = json.loads(self.pid_path.read_text())
-            pid = data.get("pid")
-            if pid is None:
-                return False
             os.kill(pid, 0)
             return True
-        except (ValueError, OSError, json.JSONDecodeError):
+        except (ValueError, OSError):
             return False
 
     def get_control_port(self) -> int | None:
-        """Get the control API port from PID file."""
-        if not self.pid_path.exists():
+        """Return the gateway/control port (single port) when running."""
+        if not self.is_running():
             return None
-        try:
-            data = json.loads(self.pid_path.read_text())
-            return data.get("control_port")
-        except (json.JSONDecodeError, ValueError):
-            return None
+        return self._gateway_port()
 
     def get_status(self) -> dict:
         """Get daemon status via control API."""
-        port = self.get_control_port()
-        if port is None:
+        if not self.is_running():
             return {"running": False}
+        port = self._gateway_port()
         try:
             with httpx.Client(timeout=5.0) as client:
                 resp = client.get(f"http://127.0.0.1:{port}/api/status")
@@ -64,9 +91,9 @@ class DaemonManager:
 
     async def async_get_status(self) -> dict:
         """Async version of get_status."""
-        port = self.get_control_port()
-        if port is None:
+        if not self.is_running():
             return {"running": False}
+        port = self._gateway_port()
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"http://127.0.0.1:{port}/api/status")
@@ -76,127 +103,145 @@ class DaemonManager:
             pass
         return {"running": True, "error": "Cannot reach control API"}
 
-    def start(self, port: int | None = None) -> None:
-        """Start the daemon as a background subprocess."""
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start(self) -> bool:
+        """Start the daemon as a background subprocess and wait until ready.
+
+        Returns True if the gateway answered ``/api/status`` within the
+        startup timeout, False otherwise.
+        """
         if self.is_running():
-            return
-        import random
-        control_port = port or random.randint(20000, 30000)
-        self.dir.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["LLMGATE_CONTROL_PORT"] = str(control_port)
-        cmd = [
-            sys.executable, "-m", "llmport",
-            "--daemon",
-        ]
-        proc = subprocess.Popen(
+            return True
+        self.store.init_first_run()  # ensure config + run any migration
+        cmd = [sys.executable, "-m", "llmport", "--daemon"]
+        subprocess.Popen(
             cmd,
-            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,  # detach from TUI
+            start_new_session=True,  # detach from the caller
         )
-        # Write PID info
-        self.pid_path.write_text(json.dumps({
-            "pid": proc.pid,
-            "control_port": control_port,
-            "started_at": time.time(),
-        }))
-        # Give it a moment to start
-        time.sleep(0.5)
-
-    def stop(self) -> None:
-        """Stop the daemon via control API and wait for process exit before
-        cleaning up the PID file."""
-        port = self.get_control_port()
-        pid = None
-        if port:
+        # Wait for the gateway to answer on its port.
+        port = self._gateway_port()
+        deadline = time.monotonic() + _START_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
             try:
-                with httpx.Client(timeout=5.0) as client:
-                    client.post(f"http://127.0.0.1:{port}/api/daemon/stop")
+                with httpx.Client(timeout=1.0) as client:
+                    if client.get(
+                        f"http://127.0.0.1:{port}/api/status"
+                    ).status_code == 200:
+                        # Confirm it is OUR daemon (PID file present + alive),
+                        # not another process squatting on the port.
+                        return self.is_running()
             except Exception:
                 pass
-        # Read PID before unlinking, so we can verify the process stopped
-        if self.pid_path.exists():
-            try:
-                data = json.loads(self.pid_path.read_text())
-                pid = data.get("pid")
-            except (json.JSONDecodeError, ValueError, OSError):
-                pass
-        if pid:
-            # Poll for process termination (up to ~5 s)
-            for _ in range(10):
-                try:
-                    os.kill(pid, 0)
-                    time.sleep(0.5)
-                except OSError:
-                    break
-        if self.pid_path.exists():
-            self.pid_path.unlink()
+            time.sleep(0.25)
+        return False
+
+    def stop(self) -> None:
+        """Stop the daemon: ask the control API, then escalate to signals."""
+        pid = self._read_pid_field("pid")
+        if pid is None:
+            self._cleanup_pid()
+            return
+
+        port = self._gateway_port()
+        # 1. Ask the control API to shut down gracefully.
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                client.post(f"http://127.0.0.1:{port}/api/daemon/stop")
+        except Exception:
+            pass
+        if self._wait_for_exit(pid, 6.0):
+            self._cleanup_pid()
+            return
+
+        # 2. SIGTERM (uvicorn handles it gracefully).
+        try:
+            os.kill(pid, 15)  # SIGTERM
+        except OSError:
+            pass
+        if self._wait_for_exit(pid, 5.0):
+            self._cleanup_pid()
+            return
+
+        # 3. SIGKILL as a last resort.
+        try:
+            os.kill(pid, 9)  # SIGKILL
+        except OSError:
+            pass
+        self._wait_for_exit(pid, 2.0)
+        self._cleanup_pid()
 
     def restart(self) -> None:
         """Restart the daemon."""
         self.stop()
-        time.sleep(1.0)
+        time.sleep(0.5)
         self.start()
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _wait_for_exit(self, pid: int, timeout: float) -> bool:
+        """Poll until the process is gone. Returns True if it exited."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return True
+            time.sleep(0.25)
+        return False
+
+    def _cleanup_pid(self) -> None:
+        if self.pid_path.exists():
+            try:
+                self.pid_path.unlink()
+            except OSError:
+                pass
 
 
 def run_daemon() -> None:
-    """Entry point for daemon mode. Called when llmport is run with --daemon."""
-    import os
-    import time
-    import json
-    import threading
+    """Entry point for daemon mode (``llmport --daemon``).
+
+    Runs a single uvicorn server on the configured loopback host/port. The
+    PID file is written so the CLI's status/stop commands work, and removed
+    on exit.
+    """
     import uvicorn
 
-    from llmport.config.store import ConfigStore
     from llmport.gateway.server import create_app
+    from llmport.gateway import control_api
     from llmport.gateway.state import migrate_gateway_config
 
     store = ConfigStore()
-    if not store.key_path.exists():
-        store.init_first_run()
+    store.init_first_run()  # handles first-run create + legacy migration
 
-    # Write PID file so status/stop CLI commands work
-    control_port = int(os.environ.get("LLMGATE_CONTROL_PORT", "0"))
-    config_dir = os.environ.get(
-        "XDG_CONFIG_HOME",
-        os.path.join(os.path.expanduser("~"), ".config"),
-    )
-    pid_dir = os.path.join(config_dir, "llmport")
-    os.makedirs(pid_dir, exist_ok=True)
-    pid_path = os.path.join(pid_dir, "daemon.pid")
-    with open(pid_path, "w") as f:
-        json.dump({
-            "pid": os.getpid(),
-            "control_port": control_port,
-            "started_at": time.time(),
-        }, f)
-
-    # Create the two applications
-    gateway_app, control_app = create_app(store)
-
-    gw = migrate_gateway_config(store.load())
+    gw = migrate_gateway_config(store.load_config())
     host = gw["host"]
-    gateway_port = gw["port"]
+    port = gw["port"]
 
-    def _serve(app, port: int) -> None:
-        config = uvicorn.Config(
-            app,
-            host=host,
-            port=port,
-            log_level="warning",
-        )
-        uvicorn.Server(config).run()
+    # Write PID file: {pid, started_at, port}.
+    store.dir.mkdir(parents=True, exist_ok=True)
+    pid_path = store.dir / "daemon.pid"
+    pid_path.write_text(json.dumps({
+        "pid": os.getpid(),
+        "started_at": time.time(),
+        "port": port,
+    }))
 
-    # Start gateway on gateway port in a daemon thread
-    t = threading.Thread(
-        target=_serve, args=(gateway_app, gateway_port), daemon=True
-    )
-    t.start()
+    app = create_app(store)
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    control_api.set_shutdown_server(server)
 
-    # Control port runs in the main thread (handles signals for graceful stop)
-    if control_port:
-        _serve(control_app, control_port)
-    else:
-        t.join()
+    try:
+        server.run()
+    finally:
+        try:
+            pid_path.unlink()
+        except OSError:
+            pass

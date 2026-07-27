@@ -30,7 +30,8 @@ class TestIssue1ServerSplit:
         """Control API handlers must be importable from llmport.gateway.control_api."""
         from llmport.gateway.control_api import (
             control_status,
-            control_switch_model,
+            control_models,
+            control_models_delete,
             control_providers,
             control_test_provider,
             control_fetch_models,
@@ -41,7 +42,8 @@ class TestIssue1ServerSplit:
         # Verify each is a callable (async function)
         for handler in (
             control_status,
-            control_switch_model,
+            control_models,
+            control_models_delete,
             control_providers,
             control_test_provider,
             control_fetch_models,
@@ -63,19 +65,28 @@ class TestIssue1ServerSplit:
         )
 
     def test_create_app_still_functions_after_split(self):
-        """After the split, create_app() must still work correctly."""
+        """After the split, create_app() must still work correctly.
+
+        The gateway now uses a single-app/single-port design: create_app()
+        returns one Starlette app that serves both protocol and /api/* routes.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
             from llmport.gateway.server import create_app
-            gateway_app, control_app = create_app(store)
-            assert gateway_app is not None
-            assert control_app is not None
-            # Check that the apps have the right types of routes
-            gateway_paths = {r.path for r in gateway_app.routes}
-            assert "/openai/v1/chat/completions" in gateway_paths
-            control_paths = {r.path for r in control_app.routes}
-            assert "/api/status" in control_paths
+            from starlette.applications import Starlette
+            app = create_app(store)
+            # Single Starlette app, not a tuple/list
+            assert isinstance(app, Starlette), (
+                f"Expected a single Starlette app, got {type(app)}"
+            )
+            assert not isinstance(app, (tuple, list)), (
+                "create_app() must return a single app, not a tuple/list"
+            )
+            # The single app serves both protocol and control routes
+            paths = {r.path for r in app.routes}
+            assert "/openai/v1/chat/completions" in paths
+            assert "/api/status" in paths
 
 
 # ──────────────────────────────────────────────
@@ -118,25 +129,25 @@ class TestIssue2HandlerBase:
 class TestIssue3SdkPaths:
 
     def test_v1_chat_completions_route(self):
-        """Gateway app must expose /v1/chat/completions (SDK compat)."""
+        """The single app must expose /v1/chat/completions (SDK compat)."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
             from llmport.gateway.server import create_app
-            gateway_app, _control_app = create_app(store)
-            paths = {r.path for r in gateway_app.routes}
+            app = create_app(store)
+            paths = {r.path for r in app.routes}
             assert "/v1/chat/completions" in paths, (
                 f"Missing /v1/chat/completions route. Got routes: {paths}"
             )
 
     def test_v1_messages_route(self):
-        """Gateway app must expose /v1/messages (SDK compat)."""
+        """The single app must expose /v1/messages (SDK compat)."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
             from llmport.gateway.server import create_app
-            gateway_app, _control_app = create_app(store)
-            paths = {r.path for r in gateway_app.routes}
+            app = create_app(store)
+            paths = {r.path for r in app.routes}
             assert "/v1/messages" in paths, (
                 f"Missing /v1/messages route. Got routes: {paths}"
             )
@@ -147,8 +158,8 @@ class TestIssue3SdkPaths:
             store = ConfigStore(tmp)
             store.init_first_run()
             from llmport.gateway.server import create_app
-            gateway_app, _control_app = create_app(store)
-            paths = {r.path for r in gateway_app.routes}
+            app = create_app(store)
+            paths = {r.path for r in app.routes}
             assert "/openai/v1/chat/completions" in paths
             assert "/anthropic/v1/messages" in paths
 

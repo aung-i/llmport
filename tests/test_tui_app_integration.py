@@ -215,6 +215,30 @@ class TestLlmPortAppTabSwitching:
                 await pilot.pause()
                 assert tabbed.active == pane_id
 
+    @pytest.mark.asyncio
+    async def test_models_tab_restores_focus_after_switch(self, mock_deps):
+        """Returning to the models tab restores keyboard focus so ↑/↓/Enter work.
+
+        Switching tabs leaves focus None; without re-focusing, navigation would
+        be dead on return. With daemon not running the list is hidden, so focus
+        lands on the search input.
+        """
+        from llmport.app import LlmPortApp
+
+        app = LlmPortApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            tabbed = app.query_one(TabbedContent)
+            # Leave models, come back.
+            tabbed.active = "providers"
+            await pilot.pause()
+            tabbed.active = "models"
+            await pilot.pause()
+
+            assert app.focused is not None
+            assert app.focused.id == "model-search"
+
 
 # ===================================================================
 # TestLlMPortAppPaneRendering

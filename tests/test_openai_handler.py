@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from llmport.models.provider import ProviderConfig, ProviderModel
+from llmport.models.provider import ProviderConfig
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +20,6 @@ def provider() -> ProviderConfig:
         protocol="openai",
         base_url="https://api.openai.com",
         api_key="sk-test-123",
-        models=[ProviderModel(name="gpt-5", aliases=["gpt5"])],
     )
 
 

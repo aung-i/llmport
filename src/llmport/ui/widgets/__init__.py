@@ -10,10 +10,11 @@ class Card(Container):
 
     DEFAULT_CSS = """
     Card {
-        border: solid $border-blurred;
-        background: $boost;
+        border: solid $primary-darken-2;
+        background: $panel;
         padding: 1 2;
         margin: 1 0;
+        height: auto;
     }
     Card > #card-title {
         text-style: bold;
@@ -40,10 +41,11 @@ class Section(Container):
     DEFAULT_CSS = """
     Section {
         padding: 1 0;
+        height: auto;
     }
     Section > #section-heading {
         text-style: bold;
-        color: $secondary-lighten-1;
+        color: $secondary;
         padding: 1 0;
     }
     """

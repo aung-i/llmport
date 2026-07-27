@@ -4,21 +4,8 @@ import time
 
 from llmport.config.store import ConfigStore
 from llmport.models.provider import ProviderConfig
-from llmport.models.model import merge_aliases_into_logical_models
+from llmport.models.model import parse_models_config
 from llmport.gateway.router import Router
-
-
-def migrate_gateway_config(data: dict) -> dict:
-    """Migrate old-format gateway config (openai_port/anthropic_port) to new format (host/port).
-
-    Modifies *data* in place when migration is needed so callers can persist
-    the result.  Returns the canonical ``{"host": str, "port": int}`` dict.
-    """
-    gw = data.get("gateway", {})
-    if "host" not in gw:
-        gw = {"host": "127.0.0.1", "port": gw.get("openai_port", 11434)}
-        data["gateway"] = gw
-    return {"host": gw["host"], "port": gw.get("port", 11434)}
 
 
 class GatewayState:
@@ -28,40 +15,52 @@ class GatewayState:
         self.store = store
         self.providers: list[ProviderConfig] = []
         self.models = []
-        self.active_model_id: str | None = None
+        self.gateway: dict = {"host": "127.0.0.1", "port": 11434}
         self.started_at = time.time()
         self.request_count = 0
         self.total_tokens = 0
         self.reload()
 
     def reload(self) -> None:
-        """Reload config from disk."""
-        data = self.store.load()
-        had_host = "host" in data.get("gateway", {})
-        self.gateway = migrate_gateway_config(data)
-        if not had_host:
-            self.store.save(data)
+        """Reload config and secrets from disk.
+
+        Providers are built from ``config.yaml`` with their API keys injected
+        from the encrypted ``secrets.enc`` vault. Models are parsed from the
+        ``models`` section.
+        """
+        data = self.store.load_config()
+        self.gateway = data.get("gateway") or {"host": "127.0.0.1", "port": 11434}
+        secrets = self.store.load_secrets()
+
         self.providers = [
             ProviderConfig.from_dict(p) for p in data.get("providers", [])
         ]
-        self.models = merge_aliases_into_logical_models(
-            self.providers, data.get("models", []),
-        )
-        self.active_model_id = data.get("active_model")
+        for p in self.providers:
+            p.api_key = secrets.get(p.id, "")
+
+        self.models = parse_models_config(data.get("models", []))
 
     def save(self) -> None:
-        """Persist current state to disk."""
-        data = {
+        """Persist providers/models to config.yaml and keys to secrets.enc."""
+        config = {
             "version": 1,
             "gateway": self.gateway,
-            "providers": [p.to_dict() for p in self.providers],
+            "providers": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "protocol": p.protocol,
+                    "base_url": p.base_url,
+                }
+                for p in self.providers
+            ],
             "models": [
                 {
-                    "id": m.id,
+                    "name": m.name,
                     "bindings": [
                         {
-                            "provider_id": b.provider_id,
-                            "model_name": b.model_name,
+                            "provider": b.provider,
+                            "upstream": b.upstream,
                             "priority": b.priority,
                         }
                         for b in m.bindings
@@ -70,12 +69,13 @@ class GatewayState:
                 }
                 for m in self.models
             ],
-            "active_model": self.active_model_id,
         }
-        self.store.save(data)
+        secrets = {p.id: p.api_key for p in self.providers if p.api_key}
+        self.store.save_config(config)
+        self.store.save_secrets(secrets)
 
     def get_router(self) -> Router:
-        return Router(self.providers, self.models, self.active_model_id)
+        return Router(self.providers, self.models)
 
 
 STATE: GatewayState | None = None
@@ -95,3 +95,17 @@ def get_state() -> GatewayState:
     """
     assert STATE is not None
     return STATE
+
+
+def migrate_gateway_config(data: dict) -> dict:
+    """Return the canonical ``{"host", "port"}`` gateway dict from a config dict.
+
+    Kept as a thin shim for callers that still normalize a loaded config dict.
+    """
+    gw = data.get("gateway") or {}
+    if "host" not in gw:
+        gw = {
+            "host": "127.0.0.1",
+            "port": gw.get("openai_port", gw.get("anthropic_port", 11434)),
+        }
+    return {"host": gw.get("host", "127.0.0.1"), "port": int(gw.get("port", 11434))}

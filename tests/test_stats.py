@@ -2,6 +2,9 @@
 
 Covers non-streaming and streaming paths for both request counting and
 usage token accumulation as specified in the design spec.
+
+Routing is by client-sent ``model`` field, so every request must include
+``"model": "gpt5"`` matching the configured logical model name.
 """
 
 import tempfile
@@ -12,15 +15,6 @@ from starlette.testclient import TestClient
 from llmport.config.store import ConfigStore
 from llmport.gateway import server as gateway_server
 
-
-_BASE_PROVIDER = {
-    "id": "test-p",
-    "name": "Test",
-    "protocol": "openai",
-    "base_url": "https://api.example.com",
-    "api_key": "sk-test",
-    "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
-}
 
 _SUCCESS_RESPONSE = {
     "id": "chatcmpl-abc",
@@ -37,14 +31,26 @@ _SUCCESS_RESPONSE_NO_USAGE = {
 
 
 def _make_app(tmp):
+    """Create a gateway app with one OpenAI provider and a 'gpt5' model."""
     store = ConfigStore(tmp)
     store.init_first_run()
-    data = store.load()
-    data["providers"].append(_BASE_PROVIDER)
-    data["active_model"] = "gpt5"
-    store.save(data)
-    gateway_app, _control_app = gateway_server.create_app(store)
-    return gateway_app
+    store.save_config({
+        "version": 1,
+        "gateway": {"host": "127.0.0.1", "port": 11434},
+        "providers": [
+            {
+                "id": "test-p",
+                "name": "Test",
+                "protocol": "openai",
+                "base_url": "https://api.example.com",
+            },
+        ],
+        "models": [
+            {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
+        ],
+    })
+    store.save_secrets({"test-p": "sk-test"})
+    return gateway_server.create_app(store)
 
 
 # ──────────────────────────────────────────────

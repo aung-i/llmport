@@ -4,15 +4,8 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class ProviderModel:
-    """A model offered by a provider, with its aliases."""
-    name: str                      # actual model name on the provider's API
-    aliases: list[str] = field(default_factory=list)
-
-
-@dataclass
 class ProviderHealth:
-    """Health check result for a provider."""
+    """Health check result for a provider (runtime state, not persisted in config)."""
     status: str = "unknown"        # "up" | "degraded" | "down"
     latency_ms: float = 0.0
     last_check: str | None = None  # ISO timestamp
@@ -20,13 +13,18 @@ class ProviderHealth:
 
 @dataclass
 class ProviderConfig:
-    """Configuration for an LLM provider."""
+    """Configuration for an LLM provider - connection info only.
+
+    Model routing lives in the ``models`` config section, not here.
+    ``api_key`` is populated at runtime from the encrypted secrets vault
+    and is never written to the readable ``config.yaml``.
+    """
+
     id: str                        # unique slug, e.g. "anthropic"
     name: str                      # display name, e.g. "Anthropic"
     protocol: str                  # "openai" | "anthropic"
     base_url: str                  # e.g. "https://api.anthropic.com"
-    api_key: str                   # plaintext key in memory, encrypted on disk
-    models: list[ProviderModel] = field(default_factory=list)
+    api_key: str = ""              # plaintext in memory; encrypted in secrets.enc on disk
     health: ProviderHealth = field(default_factory=ProviderHealth)
 
     def to_dict(self, include_key: bool = True) -> dict:
@@ -35,12 +33,6 @@ class ProviderConfig:
             "name": self.name,
             "protocol": self.protocol,
             "base_url": self.base_url,
-            "models": [{"name": m.name, "aliases": m.aliases} for m in self.models],
-            "health": {
-                "status": self.health.status,
-                "latency_ms": self.health.latency_ms,
-                "last_check": self.health.last_check,
-            },
         }
         if include_key:
             result["api_key"] = self.api_key
@@ -50,13 +42,19 @@ class ProviderConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProviderConfig":
+        # Tolerate legacy entries that carried `models`/`health`; they are
+        # ignored here - models live in the `models` section, health is runtime.
+        health = ProviderHealth()
+        raw_health = d.get("health") or {}
+        if isinstance(raw_health, dict):
+            for k in ("status", "latency_ms", "last_check"):
+                if k in raw_health:
+                    setattr(health, k, raw_health[k])
         return cls(
             id=d["id"],
-            name=d["name"],
+            name=d.get("name", d["id"]),
             protocol=d["protocol"],
             base_url=d["base_url"],
-            api_key=d["api_key"],
-            models=[ProviderModel(name=m["name"], aliases=m.get("aliases", []))
-                    for m in d.get("models", [])],
-            health=ProviderHealth(**d.get("health", {})),
+            api_key=d.get("api_key", ""),
+            health=health,
         )

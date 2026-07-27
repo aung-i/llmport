@@ -19,21 +19,22 @@ _REAL_KEY = "sk-real-secret-key-not-masked"
 def _make_app_with_provider(tmp):
     store = ConfigStore(tmp)
     store.init_first_run()
-    data = store.load()
-    data["providers"] = [
-        {
-            "id": "test-p",
-            "name": "Test",
-            "protocol": "openai",
-            "base_url": "https://api.example.com",
-            "api_key": _REAL_KEY,
-            "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
-        },
-    ]
-    data["active_model"] = "gpt5"
-    store.save(data)
-    gateway_app, control_app = create_app(store)
-    return control_app
+    store.save_config({
+        "version": 1,
+        "gateway": {"host": "127.0.0.1", "port": 11434},
+        "providers": [
+            {
+                "id": "test-p",
+                "name": "Test",
+                "protocol": "openai",
+                "base_url": "https://api.example.com",
+            },
+        ],
+        "models": [],
+    })
+    store.save_secrets({"test-p": _REAL_KEY})
+    app = create_app(store)
+    return app
 
 
 class TestApiKeyProtection:
@@ -41,17 +42,16 @@ class TestApiKeyProtection:
     def test_asterisks_preserves_existing_key(self):
         """POST with api_key="***" must NOT overwrite the real key."""
         with tempfile.TemporaryDirectory() as tmp:
-            control_app = _make_app_with_provider(tmp)
-            client = TestClient(control_app)
+            app = _make_app_with_provider(tmp)
+            client = TestClient(app)
 
-            # Send "***" as the key — should be treated as "keep existing"
+            # Send "***" as the key - should be treated as "keep existing"
             resp = client.post("/api/providers", json={
                 "id": "test-p",
                 "name": "Test",
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": "***",
-                "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
             })
             assert resp.status_code == 200
 
@@ -75,8 +75,8 @@ class TestApiKeyProtection:
     def test_new_key_overwrites(self):
         """POST with a new (non-"***") api_key should replace the existing key."""
         with tempfile.TemporaryDirectory() as tmp:
-            control_app = _make_app_with_provider(tmp)
-            client = TestClient(control_app)
+            app = _make_app_with_provider(tmp)
+            client = TestClient(app)
 
             new_key = "sk-new-key"
             resp = client.post("/api/providers", json={
@@ -85,7 +85,6 @@ class TestApiKeyProtection:
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": new_key,
-                "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
             })
             assert resp.status_code == 200
 
@@ -99,8 +98,8 @@ class TestApiKeyProtection:
         """A brand-new provider with api_key="***" should store "***"
         literally (there is no existing key to preserve)."""
         with tempfile.TemporaryDirectory() as tmp:
-            control_app = _make_app_with_provider(tmp)
-            client = TestClient(control_app)
+            app = _make_app_with_provider(tmp)
+            client = TestClient(app)
 
             # Add a brand-new provider with "***"
             resp = client.post("/api/providers", json={
@@ -109,7 +108,6 @@ class TestApiKeyProtection:
                 "protocol": "openai",
                 "base_url": "https://api.new.com",
                 "api_key": "***",
-                "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
             })
             assert resp.status_code == 200
 

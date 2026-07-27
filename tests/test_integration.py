@@ -1,49 +1,51 @@
 """End-to-end integration test for config + gateway flow."""
 
 import tempfile
+
+import yaml
+
 from llmport.config.store import ConfigStore
+from llmport.config.crypto import generate_key, encrypt
 from llmport.gateway.server import create_app
 from llmport.gateway.state import migrate_gateway_config
 from starlette.testclient import TestClient
 
 
 def test_full_flow():
-    """Test: configure a provider, start server, switch model, send request."""
+    """Test: configure a provider, start server, send request."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
 
-        # Add a provider
-        data = store.load()
-        data["providers"].append({
+        # Add a provider (no api_key in config - that goes to secrets)
+        config = store.load_config()
+        config["providers"].append({
             "id": "test-provider",
             "name": "Test",
             "protocol": "openai",
             "base_url": "https://httpbin.org",
-            "api_key": "sk-test",
-            "models": [{"name": "test-model", "aliases": ["test"]}],
         })
-        data["active_model"] = "test"
-        store.save(data)
+        config["models"].append({
+            "name": "test-model",
+            "provider": "test-provider",
+            "upstream": "test-model-real",
+        })
+        store.save_config(config)
+        store.save_secrets({"test-provider": "sk-test"})
 
-        # Create apps
-        gateway_app, control_app = create_app(store)
-        control = TestClient(control_app)
-        gateway = TestClient(gateway_app)
+        # Single app serves both protocol routes and control API
+        app = create_app(store)
+        client = TestClient(app)
 
         # Check status via control API
-        resp = control.get("/api/status")
+        resp = client.get("/api/status")
         assert resp.status_code == 200
         status = resp.json()
-        assert status["active_model"] == "test"
+        assert "test-model" in status["models"]
         assert "total_tokens" in status
 
-        # Switch model via control API
-        resp = control.post("/api/models/switch", json={"model_id": "test"})
-        assert resp.status_code == 200
-
         # Models endpoint via gateway
-        resp = gateway.get("/openai/v1/models")
+        resp = client.get("/openai/v1/models")
         assert resp.status_code == 200
         models = resp.json()
         assert len(models["data"]) >= 1
@@ -54,8 +56,8 @@ def test_control_api_providers():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         # List providers (empty)
         resp = client.get("/api/providers")
@@ -67,9 +69,8 @@ def test_control_api_providers():
             "id": "test",
             "name": "Test",
             "protocol": "openai",
-            "base_url": "https://api.test.com",
+            "base_url": "https://api.example.com",
             "api_key": "sk-test",
-            "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
         })
         assert resp.status_code == 200
 
@@ -85,19 +86,22 @@ def test_protocol_mismatch_error():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        data = store.load()
-        data["providers"].append({
+        config = store.load_config()
+        config["providers"].append({
             "id": "ant",
             "name": "Anthropic",
             "protocol": "anthropic",
             "base_url": "https://api.anthropic.com",
-            "api_key": "sk-ant-test",
-            "models": [{"name": "claude", "aliases": ["claude"]}],
         })
-        data["active_model"] = "claude"
-        store.save(data)
-        gateway_app, control_app = create_app(store)
-        client = TestClient(gateway_app)
+        config["models"].append({
+            "name": "claude",
+            "provider": "ant",
+            "upstream": "claude-real",
+        })
+        store.save_config(config)
+        store.save_secrets({"ant": "sk-ant-test"})
+        app = create_app(store)
+        client = TestClient(app)
 
         resp = client.post("/openai/v1/chat/completions", json={
             "model": "claude",
@@ -112,8 +116,8 @@ def test_gateway_config():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         # GET default config
         resp = client.get("/api/gateway/config")
@@ -131,7 +135,7 @@ def test_gateway_config():
         assert resp.json()["ok"] is True
         assert resp.json()["gateway"]["host"] == "localhost"
         assert resp.json()["gateway"]["port"] == 9999
-        assert resp.json().get("warning") is None  # loopback → no warning
+        assert resp.json().get("warning") is None  # loopback -> no warning
 
         # GET confirm persistence
         resp = client.get("/api/gateway/config")
@@ -157,12 +161,62 @@ def test_gateway_config():
 
 
 def test_config_migration_old_format():
-    """migrate_gateway_config converts old openai_port format."""
-    data = {"gateway": {"openai_port": 8080}}
-    result = migrate_gateway_config(data)
-    assert result == {"host": "127.0.0.1", "port": 8080}
-    # Data dict was migrated in place
-    assert data["gateway"] == {"host": "127.0.0.1", "port": 8080}
+    """Legacy config.enc is migrated to config.yaml + secrets.enc.
+
+    init_first_run() detects a legacy encrypted single-blob config and
+    splits it into readable config.yaml (no keys) + encrypted secrets.enc.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+
+        # Simulate a legacy install: write a Fernet key + encrypted config.enc
+        # blob that contains providers with inline api_key and old-style
+        # model bindings (id/provider_id/model_name).
+        key = generate_key()
+        store.key_path.write_bytes(key)
+        store.key_path.chmod(0o600)
+        legacy = {
+            "gateway": {"host": "127.0.0.1", "port": 8080},
+            "providers": [
+                {
+                    "id": "openai",
+                    "name": "OpenAI",
+                    "protocol": "openai",
+                    "base_url": "https://api.openai.com",
+                    "api_key": "sk-legacy",
+                },
+            ],
+            "models": [
+                {
+                    "id": "gpt",
+                    "bindings": [
+                        {"provider_id": "openai", "model_name": "gpt-4"},
+                    ],
+                },
+            ],
+        }
+        store.legacy_path.write_bytes(encrypt(key, yaml.dump(legacy)))
+
+        # init_first_run sees the legacy blob + key and migrates.
+        store.init_first_run()
+
+        # The legacy blob is gone; config.yaml + secrets.enc now exist.
+        assert store.config_path.exists()
+        assert not store.legacy_path.exists()
+
+        config = store.load_config()
+        # Gateway migrated from old shape.
+        assert config["gateway"] == {"host": "127.0.0.1", "port": 8080}
+
+        # API keys live ONLY in the secrets vault, never in config.yaml.
+        assert all("api_key" not in p for p in config["providers"])
+        secrets = store.load_secrets()
+        assert secrets["openai"] == "sk-legacy"
+
+        # Models migrated to the new name/provider/upstream shape.
+        assert config["models"][0]["name"] == "gpt"
+        assert config["models"][0]["provider"] == "openai"
+        assert config["models"][0]["upstream"] == "gpt-4"
 
 
 def test_config_migration_empty_gateway():
@@ -177,17 +231,16 @@ def test_provider_delete():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         # Add a provider
         client.post("/api/providers", json={
             "id": "test-provider",
             "name": "Test",
             "protocol": "openai",
-            "base_url": "https://api.test.com",
+            "base_url": "https://api.example.com",
             "api_key": "sk-test",
-            "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
         })
 
         # Confirm it exists
@@ -209,8 +262,8 @@ def test_daemon_restart_endpoint():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         resp = client.post("/api/daemon/restart")
         assert resp.status_code == 200
@@ -223,8 +276,8 @@ def test_gateway_config_rejects_non_loopback():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         resp = client.post("/api/gateway/config", json={
             "host": "0.0.0.0",
@@ -241,8 +294,8 @@ def test_gateway_config_rejects_empty_host():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         resp = client.post("/api/gateway/config", json={
             "host": "",
@@ -256,16 +309,15 @@ def test_control_test_provider_endpoint():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         resp = client.post("/api/providers/test", json={
             "id": "test",
             "name": "Test",
             "protocol": "openai",
-            "base_url": "https://httpbin.org",
+            "base_url": "https://api.example.com",
             "api_key": "sk-test",
-            "models": [],
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -278,16 +330,15 @@ def test_control_fetch_models_endpoint():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        gateway_app, control_app = create_app(store)
-        client = TestClient(control_app)
+        app = create_app(store)
+        client = TestClient(app)
 
         resp = client.post("/api/providers/models", json={
             "id": "test",
             "name": "Test",
             "protocol": "openai",
-            "base_url": "https://httpbin.org",
+            "base_url": "https://api.example.com",
             "api_key": "sk-test",
-            "models": [],
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -343,12 +394,12 @@ def test_first_run_detection_with_empty_providers():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        data = store.load()
-        # Fresh config has empty providers — should be detected as first run
-        assert data.get("providers") == []
+        config = store.load_config()
+        # Fresh config has empty providers - should be detected as first run
+        assert config.get("providers") == []
 
         # Add a provider and verify detection works
-        data["providers"].append({"id": "test", "name": "Test"})
-        store.save(data)
-        data = store.load()
-        assert len(data["providers"]) == 1
+        config["providers"].append({"id": "test", "name": "Test"})
+        store.save_config(config)
+        config = store.load_config()
+        assert len(config["providers"]) == 1

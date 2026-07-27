@@ -1,6 +1,6 @@
 """Control API endpoints for the gateway daemon.
 
-Every endpoint is mounted on the *control_app* under ``/api/*``.
+Every endpoint is mounted under ``/api/*`` on the gateway port.
 """
 
 import time
@@ -9,7 +9,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from llmport.models.provider import ProviderConfig
-from llmport.models.model import merge_aliases_into_logical_models
 from llmport.gateway.state import get_state
 from llmport.gateway.ip_utils import validate_public_url
 from llmport.gateway import openai_handler, anthropic_handler
@@ -23,12 +22,13 @@ async def control_status(request: Request) -> JSONResponse:
     """Return current daemon status including stats and provider health."""
     state = get_state()
     return JSONResponse({
-        "active_model": state.active_model_id,
         "uptime": time.time() - state.started_at,
         "request_count": state.request_count,
         "total_tokens": state.total_tokens,
         "provider_count": len(state.providers),
         "model_count": len(state.models),
+        "gateway": state.gateway,
+        "models": [m.name for m in state.models],
         "providers": [
             {
                 "id": p.id,
@@ -46,29 +46,19 @@ async def control_status(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-async def control_switch_model(request: Request) -> JSONResponse:
-    """Switch the active model."""
-    state = get_state()
-    body = await request.json()
-    model_id = body.get("model_id")
-    state.active_model_id = model_id
-    state.save()
-    return JSONResponse({"ok": True, "active_model": model_id})
-
-
 async def control_models(request: Request) -> JSONResponse:
-    """Return the list of logical models with their bindings."""
+    """Return the list of configured models with their bindings."""
     state = get_state()
     return JSONResponse({
         "models": [
             {
-                "id": m.id,
-                "provider_count": len(m.bindings),
+                "name": m.name,
+                "provider_count": m.provider_count,
                 "routing_strategy": m.routing_strategy,
                 "bindings": [
                     {
-                        "provider_id": b.provider_id,
-                        "model_name": b.model_name,
+                        "provider": b.provider,
+                        "upstream": b.upstream,
                         "priority": b.priority,
                     }
                     for b in m.bindings_sorted
@@ -76,18 +66,19 @@ async def control_models(request: Request) -> JSONResponse:
             }
             for m in state.models
         ],
-        "active_model": state.active_model_id,
     })
 
 
 async def control_models_delete(request: Request) -> JSONResponse:
-    """Delete a logical model by id."""
+    """Delete a configured model by name."""
     state = get_state()
     body = await request.json()
-    model_id = body.get("model_id")
-    if not model_id:
-        return JSONResponse({"ok": False, "error": "Missing model_id"}, status_code=400)
-    state.models = [m for m in state.models if m.id != model_id]
+    name = body.get("name") or body.get("model_id")
+    if not name:
+        return JSONResponse(
+            {"ok": False, "error": "Missing model name"}, status_code=400
+        )
+    state.models = [m for m in state.models if m.name != name]
     state.save()
     return JSONResponse({"ok": True})
 
@@ -98,7 +89,11 @@ async def control_models_delete(request: Request) -> JSONResponse:
 
 
 async def control_providers(request: Request) -> JSONResponse:
-    """CRUD for provider configurations."""
+    """CRUD for provider configurations.
+
+    API keys are stored in the encrypted secrets vault, never in the readable
+    config. A ``"***"`` api_key means "keep the existing key".
+    """
     state = get_state()
     if request.method == "GET":
         return JSONResponse([
@@ -106,37 +101,30 @@ async def control_providers(request: Request) -> JSONResponse:
         ])
     elif request.method == "POST":
         body = await request.json()
-        # Issue #1: SSRF — validate base_url
+        # SSRF: validate base_url
         if not validate_public_url(body.get("base_url", "")):
             return JSONResponse(
                 {"ok": False, "error": "不允许使用内网/本地地址"},
                 status_code=400,
             )
-        # Issue #4: Protect existing API key when the UI sends "***"
+        # Protect existing API key when the UI sends "***"
         raw_key = body.get("api_key")
         if raw_key == "***":
             existing = {p.id: p for p in state.providers}
-            if body["id"] in existing:
+            if body.get("id") and body["id"] in existing:
                 stored = existing[body["id"]]
                 if body.get("base_url") != stored.base_url:
-                    return JSONResponse({"error": "base_url mismatch"}, status_code=400)
+                    return JSONResponse(
+                        {"error": "base_url mismatch"}, status_code=400
+                    )
                 body["api_key"] = stored.api_key
         elif raw_key == "":
             # Empty string means "clear the key"
             body["api_key"] = ""
         provider = ProviderConfig.from_dict(body)
-        existing = [p for p in state.providers if p.id != provider.id]
-        existing.append(provider)
-        state.providers = existing
-        state.models = merge_aliases_into_logical_models(
-            state.providers,
-            [{"id": m.id, "bindings": [
-                {"provider_id": b.provider_id,
-                 "model_name": b.model_name,
-                 "priority": b.priority}
-                for b in m.bindings
-            ]} for m in state.models],
-        )
+        state.providers = [
+            p for p in state.providers if p.id != provider.id
+        ] + [provider]
         state.save()
         return JSONResponse({"ok": True})
     elif request.method == "DELETE":
@@ -148,15 +136,6 @@ async def control_providers(request: Request) -> JSONResponse:
                 status_code=400,
             )
         state.providers = [p for p in state.providers if p.id != provider_id]
-        state.models = merge_aliases_into_logical_models(
-            state.providers,
-            [{"id": m.id, "bindings": [
-                {"provider_id": b.provider_id,
-                 "model_name": b.model_name,
-                 "priority": b.priority}
-                for b in m.bindings
-            ]} for m in state.models],
-        )
         state.save()
         return JSONResponse({"ok": True})
 
@@ -164,7 +143,7 @@ async def control_providers(request: Request) -> JSONResponse:
 async def control_test_provider(request: Request) -> JSONResponse:
     """Test a provider connection."""
     body = await request.json()
-    # Resolve "***" sentinel — look up real key from stored providers
+    # Resolve "***" sentinel - look up real key from stored providers
     raw_key = body.get("api_key")
     if raw_key == "***":
         state = get_state()
@@ -189,7 +168,7 @@ async def control_test_provider(request: Request) -> JSONResponse:
 async def control_fetch_models(request: Request) -> JSONResponse:
     """Fetch model list from a provider."""
     body = await request.json()
-    # Resolve "***" sentinel — look up real key from stored providers
+    # Resolve "***" sentinel - look up real key from stored providers
     raw_key = body.get("api_key")
     if raw_key == "***":
         state = get_state()
@@ -230,7 +209,7 @@ async def control_gateway_config(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
-        # Issue #9: Reject non-loopback addresses
+        # Reject non-loopback addresses
         if host not in {"127.0.0.1", "localhost", "::1"}:
             return JSONResponse(
                 {"ok": False, "error": "仅支持本地回环地址 (127.0.0.1 / localhost / ::1)"},
@@ -252,12 +231,21 @@ async def control_gateway_config(request: Request) -> JSONResponse:
 # Daemon lifecycle
 # ---------------------------------------------------------------------------
 
+# The uvicorn Server instance, set by run_daemon() so the control API can
+# trigger a graceful shutdown by flipping ``should_exit``.
+_shutdown_server = None
+
+
+def set_shutdown_server(server) -> None:
+    """Register the running uvicorn server for graceful shutdown."""
+    global _shutdown_server
+    _shutdown_server = server
+
 
 async def control_daemon_stop(request: Request) -> JSONResponse:
-    """Initiate graceful shutdown."""
-    import os
-    import signal
-    os.kill(os.getpid(), signal.SIGTERM)
+    """Initiate graceful shutdown by signalling the uvicorn server to exit."""
+    if _shutdown_server is not None:
+        _shutdown_server.should_exit = True
     return JSONResponse({"ok": True})
 
 

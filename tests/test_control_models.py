@@ -2,10 +2,16 @@
 
 This endpoint replaces the alias_map duplicate logic in the TUI models screen
 by providing a consolidated model list with provider bindings.
+
+Under the new API, models are configured in the ``models`` config section
+(with ``name`` + ``bindings``) rather than as provider aliases, and routing
+is by the client-sent ``model`` field.  The ``/api/models`` response uses
+``name`` / ``provider`` / ``upstream`` (not ``id`` / ``provider_id`` /
+``model_name``) and no longer carries an ``active_model`` field.
 """
 
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -16,36 +22,43 @@ from llmport.gateway.server import create_app
 
 
 def _make_app_with_providers(tmp):
+    """Create the single gateway app with two providers and a multi-binding model.
+
+    The ``chat`` model has two bindings (p1/gpt-5 + p2/claude-opus) so that
+    fallback / multi-provider behaviour can be exercised.
+    """
     store = ConfigStore(tmp)
     store.init_first_run()
-    data = store.load()
-    data["providers"] = [
-        {
-            "id": "p1",
-            "name": "P1",
-            "protocol": "openai",
-            "base_url": "https://api.p1.com",
-            "api_key": "sk-p1",
-            "models": [
-                {"name": "gpt-5", "aliases": ["gpt5", "chat"]},
-                {"name": "gpt-4", "aliases": ["gpt4"]},
-            ],
-        },
-        {
-            "id": "p2",
-            "name": "P2",
-            "protocol": "openai",
-            "base_url": "https://api.p2.com",
-            "api_key": "sk-p2",
-            "models": [
-                {"name": "claude-opus", "aliases": ["opus", "chat"]},
-            ],
-        },
-    ]
-    data["active_model"] = "chat"
-    store.save(data)
-    gateway_app, control_app = create_app(store)
-    return control_app
+    store.save_config({
+        "version": 1,
+        "gateway": {"host": "127.0.0.1", "port": 11434},
+        "providers": [
+            {
+                "id": "p1",
+                "name": "P1",
+                "protocol": "openai",
+                "base_url": "https://api.p1.com",
+            },
+            {
+                "id": "p2",
+                "name": "P2",
+                "protocol": "openai",
+                "base_url": "https://api.p2.com",
+            },
+        ],
+        "models": [
+            {
+                "name": "chat",
+                "bindings": [
+                    {"provider": "p1", "upstream": "gpt-5", "priority": 1},
+                    {"provider": "p2", "upstream": "claude-opus", "priority": 2},
+                ],
+            },
+            {"name": "gpt-4", "provider": "p1", "upstream": "gpt-4"},
+        ],
+    })
+    store.save_secrets({"p1": "sk-p1", "p2": "sk-p2"})
+    return create_app(store)
 
 
 class TestApiModelsEndpoint:
@@ -53,44 +66,65 @@ class TestApiModelsEndpoint:
     def test_api_models_returns_200(self):
         """GET /api/models must return 200."""
         with tempfile.TemporaryDirectory() as tmp:
-            control_app = _make_app_with_providers(tmp)
-            client = TestClient(control_app)
+            app = _make_app_with_providers(tmp)
+            client = TestClient(app)
 
             resp = client.get("/api/models")
             assert resp.status_code == 200, (
                 f"Expected 200, got {resp.status_code}"
             )
 
-    def test_api_models_returns_merged_models_with_bindings(self):
-        """Response must contain models merged by alias, each with bindings
-        listing provider_id, model_name, and priority."""
+    def test_api_models_has_no_active_model_field(self):
+        """The response must not carry an 'active_model' field (removed)."""
         with tempfile.TemporaryDirectory() as tmp:
-            control_app = _make_app_with_providers(tmp)
-            client = TestClient(control_app)
+            app = _make_app_with_providers(tmp)
+            client = TestClient(app)
 
-            resp = client.get("/api/models")
-            data = resp.json()
+            data = client.get("/api/models").json()
+            assert "active_model" not in data
+
+    def test_api_models_returns_models_with_bindings(self):
+        """Response contains models keyed by 'name', each with bindings
+        listing 'provider', 'upstream', and 'priority'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_with_providers(tmp)
+            client = TestClient(app)
+
+            data = client.get("/api/models").json()
             assert "models" in data, "Response must contain 'models' key"
             assert isinstance(data["models"], list), (
                 f"Expected a list of models, got {type(data['models'])}"
             )
             assert len(data["models"]) > 0, "Must have at least one model"
 
-            # Check each model has the right structure
+            # Check each model has the right structure.
             for m in data["models"]:
-                assert "id" in m, f"Model missing 'id': {m}"
-                assert "bindings" in m, f"Model {m['id']} missing bindings"
-                assert len(m["bindings"]) > 0, f"Model {m['id']} has no bindings"
+                assert "name" in m, f"Model missing 'name': {m}"
+                assert "bindings" in m, f"Model {m['name']} missing bindings"
+                assert len(m["bindings"]) > 0, f"Model {m['name']} has no bindings"
                 for b in m["bindings"]:
-                    assert "provider_id" in b, f"Binding missing provider_id: {b}"
-                    assert "model_name" in b, f"Binding missing model_name: {b}"
+                    assert "provider" in b, f"Binding missing 'provider': {b}"
+                    assert "upstream" in b, f"Binding missing 'upstream': {b}"
 
-            # 'chat' alias should have 2 bindings (p1/gpt-5 + p2/claude-opus)
-            chat_model = next((m for m in data["models"] if m["id"] == "chat"), None)
-            assert chat_model is not None, "chat model should exist (2 providers)"
-            assert len(chat_model["bindings"]) == 2, (
-                f"chat model should have 2 bindings, got {len(chat_model['bindings'])}"
+            # 'chat' should have 2 bindings (p1/gpt-5 + p2/claude-opus).
+            chat_model = next(
+                (m for m in data["models"] if m["name"] == "chat"), None
             )
+            assert chat_model is not None, "chat model should exist (2 providers)"
+            assert chat_model["provider_count"] == 2, (
+                f"chat model should have provider_count=2, "
+                f"got {chat_model['provider_count']}"
+            )
+            assert len(chat_model["bindings"]) == 2, (
+                f"chat model should have 2 bindings, "
+                f"got {len(chat_model['bindings'])}"
+            )
+
+            # Bindings should be sorted by priority and carry upstream names.
+            providers = [b["provider"] for b in chat_model["bindings"]]
+            assert providers == ["p1", "p2"]
+            upstreams = [b["upstream"] for b in chat_model["bindings"]]
+            assert upstreams == ["gpt-5", "claude-opus"]
 
 
 class TestControlApiErrorPaths:
@@ -120,7 +154,7 @@ class TestControlApiErrorPaths:
         return state
 
     # ------------------------------------------------------------------
-    # POST /api/providers — SSRF rejection
+    # POST /api/providers - SSRF rejection
     # ------------------------------------------------------------------
 
     def test_post_providers_rejects_private_url(self):
@@ -144,7 +178,7 @@ class TestControlApiErrorPaths:
         assert "内网" in data.get("error", "")
 
     # ------------------------------------------------------------------
-    # DELETE /api/providers — missing id
+    # DELETE /api/providers - missing id
     # ------------------------------------------------------------------
 
     def test_delete_providers_empty_body(self):
@@ -173,7 +207,7 @@ class TestControlApiErrorPaths:
         assert "Missing provider id" in data.get("error", "")
 
     # ------------------------------------------------------------------
-    # POST /api/providers/models — anthropic protocol
+    # POST /api/providers/models - anthropic protocol
     # ------------------------------------------------------------------
 
     def test_fetch_models_anthropic(self):
@@ -187,7 +221,6 @@ class TestControlApiErrorPaths:
             "protocol": "anthropic",
             "base_url": "https://api.anthropic.com",
             "api_key": "sk-ant-test",
-            "models": [],
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -197,26 +230,29 @@ class TestControlApiErrorPaths:
         assert "Anthropic does not expose" in data.get("error", "")
 
     def test_fetch_models_anthropic_uppercase_protocol(self):
-        """Anthropic protocol (case-sensitive check — must be lowercase)."""
+        """Uppercase 'Anthropic' protocol is case-sensitive: it is NOT treated
+        as anthropic and falls through to the openai list_models path."""
         app = self._make_models_app()
         client = TestClient(app)
-        resp = client.post("/api/providers/models", json={
-            "id": "ant",
-            "name": "Anthropic",
-            "protocol": "Anthropic",  # wrong case
-            "base_url": "https://api.anthropic.com",
-            "api_key": "sk-ant-test",
-        })
+        # Mock the openai list_models call so the test is deterministic and
+        # does not hit the network.
+        with patch(
+            "llmport.gateway.control_api.openai_handler.list_models",
+            new=AsyncMock(return_value=(None, "Failed to fetch models: 401")),
+        ):
+            resp = client.post("/api/providers/models", json={
+                "id": "ant",
+                "name": "Anthropic",
+                "protocol": "Anthropic",  # wrong case
+                "base_url": "https://api.anthropic.com",
+                "api_key": "sk-ant-test",
+            })
         assert resp.status_code == 200
         data = resp.json()
-        # Uppercase 'Anthropic' != 'anthropic' so it falls into the else branch
-        # but openai_handler.list_models would be called and fail.
-        # The behaviour here is not well-defined — we just assert the endpoint
-        # doesn't crash and returns some error.
         assert "error" in data
 
     # ------------------------------------------------------------------
-    # POST /api/providers — empty api_key clears the key
+    # POST /api/providers - empty api_key clears the key
     # ------------------------------------------------------------------
 
     def test_post_providers_empty_api_key_creates_new_provider_with_empty_key(self):
@@ -232,7 +268,6 @@ class TestControlApiErrorPaths:
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": "",
-                "models": [],
             })
         assert resp.status_code == 200, (
             f"Expected 200, got {resp.status_code}: {resp.text}"
@@ -263,7 +298,6 @@ class TestControlApiErrorPaths:
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": "",
-                "models": [],
             })
         assert resp.status_code == 200, (
             f"Expected 200, got {resp.status_code}: {resp.text}"
@@ -275,7 +309,7 @@ class TestControlApiErrorPaths:
         )
 
     # ------------------------------------------------------------------
-    # POST /api/providers/test — anthropic test_connection branch
+    # POST /api/providers/test - anthropic test_connection branch
     # ------------------------------------------------------------------
 
     def test_test_provider_anthropic(self):
@@ -288,7 +322,7 @@ class TestControlApiErrorPaths:
         client = TestClient(app)
         with patch(
             "llmport.gateway.control_api.anthropic_handler.test_connection",
-            return_value=(True, 123.4, None),
+            new=AsyncMock(return_value=(True, 123.4, None)),
         ):
             resp = client.post("/api/providers/test", json={
                 "id": "ant",
@@ -304,27 +338,46 @@ class TestControlApiErrorPaths:
         assert data.get("error") is None
 
     # ------------------------------------------------------------------
-    # POST /api/daemon/stop — graceful shutdown signal
+    # POST /api/daemon/stop - graceful shutdown signal
     # ------------------------------------------------------------------
 
-    def test_daemon_stop_sends_sigterm(self):
-        """POST /api/daemon/stop must call os.kill(os.getpid(), SIGTERM)."""
-        from llmport.gateway.control_api import control_daemon_stop
-        import os
-        import signal as sig_mod
+    def test_daemon_stop_signals_shutdown(self):
+        """POST /api/daemon/stop sets should_exit on the registered server."""
+        from llmport.gateway.control_api import (
+            control_daemon_stop,
+            set_shutdown_server,
+        )
         app = Starlette(routes=[
             Route("/api/daemon/stop", control_daemon_stop, methods=["POST"]),
         ])
         client = TestClient(app)
-        # The control_daemon_stop function does `import os` locally, so we
-        # patch os.kill directly (the function binds to the os module at runtime).
-        with patch("os.kill") as mock_kill:
+        # Register a mock server with a should_exit flag.
+        mock_server = MagicMock()
+        mock_server.should_exit = False
+        set_shutdown_server(mock_server)
+        try:
             resp = client.post("/api/daemon/stop")
+        finally:
+            set_shutdown_server(None)
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("ok") is True
-        # Verify os.kill was called with the current PID and SIGTERM
-        mock_kill.assert_called_once_with(os.getpid(), sig_mod.SIGTERM)
+        assert mock_server.should_exit is True
+
+    def test_daemon_stop_without_registered_server(self):
+        """POST /api/daemon/stop still returns ok when no server is registered."""
+        from llmport.gateway.control_api import (
+            control_daemon_stop,
+            set_shutdown_server,
+        )
+        app = Starlette(routes=[
+            Route("/api/daemon/stop", control_daemon_stop, methods=["POST"]),
+        ])
+        client = TestClient(app)
+        set_shutdown_server(None)
+        resp = client.post("/api/daemon/stop")
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
 
 
 # ------------------------------------------------------------------
@@ -366,7 +419,6 @@ class TestStarSentinelResolution:
             "protocol": "openai",
             "base_url": "https://api.example.com",
             "api_key": api_key,
-            "models": [],
         })
         state.providers = [provider]
         state.models = []
@@ -377,13 +429,12 @@ class TestStarSentinelResolution:
 
     def test_test_provider_resolves_asterisk_from_state(self):
         """POST /api/providers/test with api_key='***' must resolve from stored provider."""
-        from llmport.gateway.control_api import get_state
         app = self._make_test_app()
         mock_state = self._mock_state_with_provider("sk-real-key")
         with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
             with patch(
                 "llmport.gateway.control_api.openai_handler.list_models",
-                return_value=([], None),
+                new=AsyncMock(return_value=([], None)),
             ):
                 client = TestClient(app)
                 resp = client.post("/api/providers/test", json={
@@ -400,13 +451,12 @@ class TestStarSentinelResolution:
 
     def test_test_provider_asterisk_not_found_uses_literal(self):
         """POST /api/providers/test with api_key='***' but unknown id uses literal '***'."""
-        from llmport.gateway.control_api import get_state
         app = self._make_test_app()
         mock_state = self._mock_state_with_provider("sk-real-key")
         with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
             with patch(
                 "llmport.gateway.control_api.openai_handler.list_models",
-                return_value=([], None),
+                new=AsyncMock(return_value=([], None)),
             ):
                 client = TestClient(app)
                 resp = client.post("/api/providers/test", json={
@@ -424,7 +474,6 @@ class TestStarSentinelResolution:
 
     def test_post_providers_asterisk_keeps_existing_key(self):
         """POST /api/providers with api_key='***' on existing provider keeps old key."""
-        from llmport.gateway.control_api import get_state
         app = self._make_providers_app()
         mock_state = self._mock_state_with_provider("sk-secret-keep")
         with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
@@ -435,7 +484,6 @@ class TestStarSentinelResolution:
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": "***",
-                "models": [],
             })
         assert resp.status_code == 200
         # The stored api_key should still be the original, not overwritten by "***"
@@ -446,7 +494,6 @@ class TestStarSentinelResolution:
 
     def test_post_providers_asterisk_new_provider_stores_literal(self):
         """POST /api/providers with api_key='***' on NEW provider stores '***' literally."""
-        from llmport.gateway.control_api import get_state
         app = self._make_providers_app()
         mock_state = self._mock_state_with_provider("sk-other")
         with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
@@ -457,7 +504,6 @@ class TestStarSentinelResolution:
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": "***",
-                "models": [],
             })
         assert resp.status_code == 200
         # The new provider doesn't exist in state yet, so "***" is stored literally
@@ -471,13 +517,12 @@ class TestStarSentinelResolution:
 
     def test_fetch_models_resolves_asterisk_from_state(self):
         """POST /api/providers/models with api_key='***' resolves from stored provider."""
-        from llmport.gateway.control_api import get_state
         app = self._make_fetch_app()
         mock_state = self._mock_state_with_provider("sk-fetch-key")
         with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
             with patch(
                 "llmport.gateway.control_api.openai_handler.list_models",
-                return_value=(["gpt-5", "gpt-4"], None),
+                new=AsyncMock(return_value=(["gpt-5", "gpt-4"], None)),
             ):
                 client = TestClient(app)
                 resp = client.post("/api/providers/models", json={

@@ -1,130 +1,223 @@
-"""Tests for control API / gateway API isolation (Issue 2).
+"""Tests for the single-app gateway architecture.
 
-The spec requires create_app() to return two separate Starlette instances:
-- gateway_app:  OpenAI / Anthropic protocol routes only (no /api/*)
-- control_app:  /api/* control routes only
+The gateway was refactored from a TWO-app/two-port design (separate
+``gateway_app`` and ``control_app``) to a SINGLE-app/single-port design.
+``create_app(store)`` returns ONE Starlette app that serves both the
+protocol-forwarding routes (``/openai/v1/*``, ``/anthropic/v1/*``,
+``/v1/*``) and the control API (``/api/*``) on a single port.
 
-Cross-requests between the two apps must return 404.
+These tests assert the new design: one app, all routes, no cross-app 404
+isolation (because there is only one app).
 """
 
 import tempfile
 
+from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from llmport.config.store import ConfigStore
 from llmport.gateway.server import create_app
 
 
-def _make_store(tmp):
-    store = ConfigStore(tmp)
+def _make_app():
+    """Build a single Starlette app backed by a fresh ConfigStore.
+
+    Returns ``(app, tmp)`` so the caller can keep the temp dir alive for
+    the lifetime of the client.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    store = ConfigStore(tmp.name)
     store.init_first_run()
-    return store
+    app = create_app(store)
+    return app, tmp
 
 
 # ──────────────────────────────────────────────
 # App structure
 # ──────────────────────────────────────────────
 
-class TestAppSeparation:
+class TestSingleAppStructure:
 
-    def test_create_app_returns_two_apps(self):
-        """create_app() now returns a (gateway_app, control_app) tuple."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            result = create_app(store)
-            assert isinstance(result, tuple), (
-                f"Expected tuple[Starlette, Starlette], got {type(result)}"
+    def test_create_app_returns_single_starlette_app(self):
+        """create_app() returns a single Starlette instance, not a tuple/list."""
+        app, tmp = _make_app()
+        try:
+            assert isinstance(app, Starlette), (
+                f"Expected a single Starlette app, got {type(app)}"
             )
-            assert len(result) == 2
+            # Must NOT be a tuple or list (old two-app design is gone).
+            assert not isinstance(app, (tuple, list)), (
+                "create_app() must not return a tuple/list; the two-app "
+                "design was removed."
+            )
+        finally:
+            tmp.cleanup()
 
-    def test_gateway_app_excludes_api_routes(self):
-        """The gateway app should contain protocol routes but no /api/* routes."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            gateway_app, control_app = create_app(store)
+    def test_single_app_has_both_protocol_and_control_routes(self):
+        """The one app must contain both /api/* and protocol routes."""
+        app, tmp = _make_app()
+        try:
+            paths = {r.path for r in app.routes}
+            # Control API
+            assert "/api/status" in paths, "Missing /api/status control route"
+            assert "/api/models" in paths, "Missing /api/models control route"
+            assert "/api/providers" in paths, "Missing /api/providers control route"
+            # OpenAI protocol
+            assert "/openai/v1/chat/completions" in paths
+            assert "/openai/v1/models" in paths
+            # Anthropic protocol
+            assert "/anthropic/v1/messages" in paths
+            # SDK alias paths
+            assert "/v1/chat/completions" in paths
+            assert "/v1/messages" in paths
+        finally:
+            tmp.cleanup()
 
-            gateway_paths = {r.path for r in gateway_app.routes}
-            # Must contain protocol endpoints
-            assert any("/openai/v1" in p for p in gateway_paths), (
-                "Gateway app missing OpenAI routes"
+    def test_no_models_switch_route_registered(self):
+        """The removed /api/models/switch route must not be registered."""
+        app, tmp = _make_app()
+        try:
+            paths = {r.path for r in app.routes}
+            assert "/api/models/switch" not in paths, (
+                "/api/models/switch was removed and must not be registered"
             )
-            assert any("/anthropic/v1" in p for p in gateway_paths), (
-                "Gateway app missing Anthropic routes"
-            )
-            # Must NOT contain any /api/ route
-            assert not any(p.startswith("/api") for p in gateway_paths), (
-                f"Gateway app should not have /api/ routes, got: "
-                f"{[p for p in gateway_paths if p.startswith('/api')]}"
-            )
-
-    def test_control_app_only_has_api_routes(self):
-        """The control app should contain /api/* routes and nothing else."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            gateway_app, control_app = create_app(store)
-
-            control_paths = {r.path for r in control_app.routes}
-            assert len(control_paths) > 0, "Control app has no routes"
-            assert all(p.startswith("/api") for p in control_paths), (
-                f"Control app should only have /api/ routes, got: "
-                f"{[p for p in control_paths if not p.startswith('/api')]}"
-            )
+        finally:
+            tmp.cleanup()
 
 
 # ──────────────────────────────────────────────
-# Cross-request 404 isolation
+# Single app serves both control and protocol routes
 # ──────────────────────────────────────────────
 
-class TestCrossRequestIsolation:
+class TestSingleAppServesAllRoutes:
 
-    def test_gateway_app_returns_404_for_api_request(self):
-        """GET /api/status on the gateway app returns 404."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            gateway_app, control_app = create_app(store)
-            client = TestClient(gateway_app)
-
+    def test_get_api_status_returns_200(self):
+        """GET /api/status on the single app returns 200."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
             resp = client.get("/api/status")
-            assert resp.status_code == 404, (
-                f"Gateway app should return 404 for /api/status, "
-                f"got {resp.status_code}"
+            assert resp.status_code == 200, (
+                f"GET /api/status should return 200, got {resp.status_code}"
             )
+        finally:
+            tmp.cleanup()
 
-    def test_control_app_returns_404_for_gateway_request(self):
-        """GET /openai/v1/models on the control app returns 404."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            gateway_app, control_app = create_app(store)
-            client = TestClient(control_app)
-
+    def test_get_openai_models_returns_200(self):
+        """GET /openai/v1/models on the single app returns 200."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
             resp = client.get("/openai/v1/models")
-            assert resp.status_code == 404, (
-                f"Control app should return 404 for /openai/v1/models, "
-                f"got {resp.status_code}"
+            assert resp.status_code == 200, (
+                f"GET /openai/v1/models should return 200, got {resp.status_code}"
             )
+        finally:
+            tmp.cleanup()
 
-    def test_control_app_returns_404_for_chat_completions(self):
-        """POST /openai/v1/chat/completions on the control app returns 404."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            gateway_app, control_app = create_app(store)
-            client = TestClient(control_app)
+    def test_post_v1_chat_completions_missing_model_returns_400(self):
+        """POST /v1/chat/completions with no model returns 400 (route exists)."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
+            resp = client.post("/v1/chat/completions", json={})
+            assert resp.status_code == 400, (
+                f"POST /v1/chat/completions with missing model should return "
+                f"400 (route exists), got {resp.status_code}"
+            )
+            assert resp.status_code != 404, "Route must exist (not 404)"
+        finally:
+            tmp.cleanup()
 
+    def test_post_v1_messages_missing_model_returns_400(self):
+        """POST /v1/messages with no model returns 400 (route exists)."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
+            resp = client.post("/v1/messages", json={})
+            assert resp.status_code == 400, (
+                f"POST /v1/messages with missing model should return 400 "
+                f"(route exists), got {resp.status_code}"
+            )
+            assert resp.status_code != 404, "Route must exist (not 404)"
+        finally:
+            tmp.cleanup()
+
+    def test_post_openai_chat_completions_missing_model_returns_400(self):
+        """POST /openai/v1/chat/completions with no model returns 400 (route exists)."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
             resp = client.post("/openai/v1/chat/completions", json={})
-            assert resp.status_code == 404, (
-                f"Control app should return 404 for chat completions, "
-                f"got {resp.status_code}"
+            assert resp.status_code == 400, (
+                f"POST /openai/v1/chat/completions with missing model should "
+                f"return 400 (route exists), got {resp.status_code}"
             )
+            assert resp.status_code != 404, "Route must exist (not 404)"
+        finally:
+            tmp.cleanup()
 
-    def test_control_app_returns_404_for_anthropic_messages(self):
-        """POST /anthropic/v1/messages on the control app returns 404."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
-            gateway_app, control_app = create_app(store)
-            client = TestClient(control_app)
-
+    def test_post_anthropic_messages_missing_model_returns_400(self):
+        """POST /anthropic/v1/messages with no model returns 400 (route exists)."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
             resp = client.post("/anthropic/v1/messages", json={})
+            assert resp.status_code == 400, (
+                f"POST /anthropic/v1/messages with missing model should "
+                f"return 400 (route exists), got {resp.status_code}"
+            )
+            assert resp.status_code != 404, "Route must exist (not 404)"
+        finally:
+            tmp.cleanup()
+
+    def test_api_models_switch_returns_404(self):
+        """The removed /api/models/switch route returns 404."""
+        app, tmp = _make_app()
+        try:
+            client = TestClient(app)
+            resp = client.post("/api/models/switch", json={})
             assert resp.status_code == 404, (
-                f"Control app should return 404 for anthropic messages, "
+                f"/api/models/switch was removed and must 404, "
                 f"got {resp.status_code}"
             )
+        finally:
+            tmp.cleanup()
+
+
+# ──────────────────────────────────────────────
+# control_api module is importable and endpoint functions exist
+# ──────────────────────────────────────────────
+
+class TestControlApiModule:
+
+    def test_control_api_module_importable(self):
+        """The control_api module must be importable."""
+        from llmport.gateway import control_api
+        assert control_api is not None
+
+    def test_control_endpoint_functions_exist(self):
+        """All control endpoint functions must exist and be callable."""
+        from llmport.gateway import control_api
+        expected = [
+            "control_status",
+            "control_models",
+            "control_models_delete",
+            "control_providers",
+            "control_test_provider",
+            "control_fetch_models",
+            "control_gateway_config",
+            "control_daemon_stop",
+            "control_daemon_restart",
+        ]
+        for name in expected:
+            handler = getattr(control_api, name, None)
+            assert handler is not None, f"control_api.{name} is missing"
+            assert callable(handler), f"control_api.{name} is not callable"
+
+    def test_no_control_switch_model_function(self):
+        """The removed control_switch_model function must not exist."""
+        from llmport.gateway import control_api
+        assert not hasattr(control_api, "control_switch_model"), (
+            "control_switch_model was removed along with /api/models/switch"
+        )

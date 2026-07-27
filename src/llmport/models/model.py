@@ -2,99 +2,89 @@
 
 from dataclasses import dataclass, field
 
-from llmport.models.provider import ProviderConfig
-
 
 @dataclass
 class ModelBinding:
-    """Binds a logical model to a specific provider's model name with priority."""
+    """Binds a public model name to a specific provider's upstream model.
 
-    provider_id: str
-    model_name: str  # actual name on that provider
+    Attributes:
+        provider: the provider id this binding routes to.
+        upstream: the real model name on that provider's API.
+        priority: fallback order (1 = primary, 2+ = fallback).
+    """
+
+    provider: str
+    upstream: str
     priority: int = 1
 
 
 @dataclass
 class LogicalModel:
-    """A model as seen and selected by the user.
-
-    Auto-created from provider model aliases that share the same alias string.
+    """A model as named by the client in the request body.
 
     Attributes:
-        id: The alias that created/identifies this model.
-        bindings: Provider bindings sorted by priority.
-        routing_strategy: Determines how fallback works when the primary
-            provider fails.  Currently only ``"priority_fallback"`` is
-            supported: providers are tried in priority order and the first
-            healthy one is used.  Future strategies may include
-            ``"round_robin"`` or ``"latency_optimized"``.
+        name: the public model name clients send in ``{"model": name}``.
+        bindings: provider bindings, tried in priority order for fallback.
+        routing_strategy: how the next provider is picked on failure.
+            Currently only ``"priority_fallback"`` is supported: providers
+            are tried in priority order and the first healthy one is used.
     """
-    id: str
+
+    name: str
     bindings: list[ModelBinding] = field(default_factory=list)
     routing_strategy: str = "priority_fallback"
 
     @property
     def provider_count(self) -> int:
-        return len({b.provider_id for b in self.bindings})
+        return len({b.provider for b in self.bindings})
 
     @property
     def bindings_sorted(self) -> list[ModelBinding]:
         return sorted(self.bindings, key=lambda b: b.priority)
 
 
-def merge_aliases_into_logical_models(
-    providers: list[ProviderConfig],
-    existing_models: list[dict] | None = None,
-) -> list[LogicalModel]:
-    """Build logical models from provider model aliases.
+def parse_models_config(models_data: list[dict] | None) -> list[LogicalModel]:
+    """Parse the ``models`` config section into :class:`LogicalModel` instances.
 
-    When two providers both have a model with alias "claude-opus",
-    they merge into one LogicalModel with two bindings.
+    Two entry shapes are supported:
 
-    If existing_models is provided, manual bindings from those models
-    are merged in as well.
+    Shorthand (single binding, no fallback)::
+
+        - name: claude-sonnet
+          provider: anthropic
+          upstream: claude-sonnet-4
+
+    Full form (multiple bindings for fallback)::
+
+        - name: gpt-4o
+          bindings:
+            - {provider: openai, upstream: gpt-4o, priority: 1}
+            - {provider: azure-openai, upstream: gpt4o-deploy, priority: 2}
     """
-    alias_map: dict[str, list[ModelBinding]] = {}
-
-    for p in providers:
-        for m in p.models:
-            aliases = m.aliases if m.aliases else [m.name]
-            for alias in aliases:
-                if alias not in alias_map:
-                    alias_map[alias] = []
-                binding = ModelBinding(
-                    provider_id=p.id,
-                    model_name=m.name,
-                    priority=len(alias_map[alias]) + 1,
-                )
-                # Avoid duplicates
-                if not any(
-                    b.provider_id == binding.provider_id
-                    and b.model_name == binding.model_name
-                    for b in alias_map[alias]
-                ):
-                    alias_map[alias].append(binding)
-
-    # Merge with existing manual models
-    if existing_models:
-        for em in existing_models:
-            alias = em["id"]
-            if alias not in alias_map:
-                alias_map[alias] = []
-            for b in em.get("bindings", []):
-                binding = ModelBinding(
-                    provider_id=b["provider_id"],
-                    model_name=b["model_name"],
+    models: list[LogicalModel] = []
+    for entry in models_data or []:
+        name = entry.get("name") or entry.get("id")
+        if not name:
+            continue
+        strategy = entry.get("routing_strategy", "priority_fallback")
+        if "bindings" in entry:
+            bindings = [
+                ModelBinding(
+                    provider=b["provider"],
+                    upstream=b["upstream"],
                     priority=b.get("priority", 1),
                 )
-                if not any(
-                    x.provider_id == binding.provider_id
-                    and x.model_name == binding.model_name
-                    for x in alias_map[alias]
-                ):
-                    alias_map[alias].append(binding)
-
-    return [
-        LogicalModel(id=alias, bindings=bindings)
-        for alias, bindings in alias_map.items()
-    ]
+                for b in entry["bindings"]
+            ]
+        else:
+            bindings = [
+                ModelBinding(
+                    provider=entry["provider"],
+                    upstream=entry["upstream"],
+                    priority=entry.get("priority", 1),
+                )
+            ]
+        models.append(
+            LogicalModel(name=name, bindings=bindings, routing_strategy=strategy)
+        )
+    return models

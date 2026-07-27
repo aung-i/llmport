@@ -1,80 +1,162 @@
 """Tests for data models."""
 
-from llmport.models.provider import ProviderConfig, ProviderModel
+from llmport.models.provider import ProviderConfig
 from llmport.models.model import (
     ModelBinding,
     LogicalModel,
-    merge_aliases_into_logical_models,
+    parse_models_config,
 )
 
 
-def make_provider(id: str, models: list[tuple[str, list[str]]]) -> ProviderConfig:
-    return ProviderConfig(
-        id=id,
-        name=id.title(),
-        protocol="openai",
-        base_url=f"https://api.{id}.com",
-        api_key="sk-test",
-        models=[ProviderModel(name=n, aliases=a) for n, a in models],
-    )
-
-
-def test_merge_single_provider_creates_models_from_aliases():
-    providers = [
-        make_provider("openai", [
-            ("gpt-5", ["gpt5", "gpt"]),
-            ("gpt-4o", ["gpt4"]),
-        ]),
-    ]
-    models = merge_aliases_into_logical_models(providers)
-    assert len(models) == 3
-    ids = {m.id for m in models}
-    assert ids == {"gpt5", "gpt", "gpt4"}
-
-
-def test_same_alias_on_two_providers_merges():
-    providers = [
-        make_provider("anthropic", [("claude-opus-4-8", ["claude-opus"])]),
-        make_provider("openai", [("claude-opus-4-8", ["claude-opus"])]),
-    ]
-    models = merge_aliases_into_logical_models(providers)
+def test_parse_shorthand_entry_creates_single_binding():
+    models = parse_models_config([
+        {"name": "claude-sonnet", "provider": "anthropic", "upstream": "claude-sonnet-4"},
+    ])
     assert len(models) == 1
-    assert models[0].id == "claude-opus"
-    assert models[0].provider_count == 2
-    assert len(models[0].bindings) == 2
+    m = models[0]
+    assert m.name == "claude-sonnet"
+    assert m.routing_strategy == "priority_fallback"
+    assert len(m.bindings) == 1
+    b = m.bindings[0]
+    assert b.provider == "anthropic"
+    assert b.upstream == "claude-sonnet-4"
+    assert b.priority == 1
 
 
-def test_model_without_alias_uses_name():
-    providers = [
-        make_provider("openai", [("gpt-5", [])]),
-    ]
-    models = merge_aliases_into_logical_models(providers)
-    assert models[0].id == "gpt-5"
+def test_parse_shorthand_entry_with_priority():
+    models = parse_models_config([
+        {"name": "x", "provider": "p", "upstream": "u", "priority": 3},
+    ])
+    assert models[0].bindings[0].priority == 3
 
 
-def test_bindings_are_sorted_by_priority():
+def test_parse_full_entry_multiple_bindings_fallback_order():
+    models = parse_models_config([
+        {
+            "name": "gpt-4o",
+            "bindings": [
+                {"provider": "openai", "upstream": "gpt-4o", "priority": 2},
+                {"provider": "azure-openai", "upstream": "gpt4o-deploy", "priority": 1},
+            ],
+        },
+    ])
+    assert len(models) == 1
+    m = models[0]
+    assert m.name == "gpt-4o"
+    assert len(m.bindings) == 2
+    # bindings_sorted returns bindings ordered by priority ascending (fallback order)
+    assert m.bindings_sorted[0].provider == "azure-openai"
+    assert m.bindings_sorted[0].upstream == "gpt4o-deploy"
+    assert m.bindings_sorted[1].provider == "openai"
+    assert m.bindings_sorted[1].upstream == "gpt-4o"
+
+
+def test_parse_full_entry_default_priority_is_one():
+    models = parse_models_config([
+        {
+            "name": "x",
+            "bindings": [
+                {"provider": "p", "upstream": "u"},
+            ],
+        },
+    ])
+    assert models[0].bindings[0].priority == 1
+
+
+def test_provider_count_counts_distinct_providers():
+    models = parse_models_config([
+        {
+            "name": "multi",
+            "bindings": [
+                {"provider": "a", "upstream": "m1", "priority": 1},
+                {"provider": "a", "upstream": "m1-b", "priority": 2},
+                {"provider": "b", "upstream": "m2", "priority": 3},
+            ],
+        },
+    ])
+    assert len(models) == 1
+    m = models[0]
+    assert len(m.bindings) == 3
+    assert m.provider_count == 2
+
+
+def test_parse_empty_or_none_returns_empty_list():
+    assert parse_models_config(None) == []
+    assert parse_models_config([]) == []
+
+
+def test_parse_skips_entries_without_name():
+    models = parse_models_config([
+        {"provider": "p", "upstream": "u"},  # no name -> skipped
+        {"name": "ok", "provider": "p", "upstream": "u"},
+    ])
+    assert len(models) == 1
+    assert models[0].name == "ok"
+
+
+def test_parse_accepts_legacy_id_field_as_name():
+    models = parse_models_config([
+        {"id": "legacy", "provider": "p", "upstream": "u"},
+    ])
+    assert len(models) == 1
+    assert models[0].name == "legacy"
+
+
+def test_bindings_sorted_property_sorts_by_priority():
     m = LogicalModel(
-        id="test",
+        name="test",
         bindings=[
-            ModelBinding(provider_id="b", model_name="m2", priority=2),
-            ModelBinding(provider_id="a", model_name="m1", priority=1),
+            ModelBinding(provider="b", upstream="m2", priority=2),
+            ModelBinding(provider="a", upstream="m1", priority=1),
+            ModelBinding(provider="c", upstream="m3", priority=3),
         ],
     )
-    assert m.bindings_sorted[0].provider_id == "a"
-    assert m.bindings_sorted[1].provider_id == "b"
+    assert [b.provider for b in m.bindings_sorted] == ["a", "b", "c"]
 
 
-def test_provider_config_roundtrip():
+def test_provider_config_roundtrip_with_key():
     p = ProviderConfig(
         id="openai",
         name="OpenAI",
         protocol="openai",
         base_url="https://api.openai.com",
         api_key="sk-secret",
-        models=[ProviderModel(name="gpt-5", aliases=["gpt5"])],
     )
     d = p.to_dict()
+    assert d["api_key"] == "sk-secret"
+    assert "models" not in d
     p2 = ProviderConfig.from_dict(d)
     assert p2.id == p.id
+    assert p2.name == p.name
+    assert p2.protocol == p.protocol
+    assert p2.base_url == p.base_url
     assert p2.api_key == p.api_key
-    assert p2.models[0].aliases == ["gpt5"]
+
+
+def test_provider_config_roundtrip_without_key_masks_secret():
+    p = ProviderConfig(
+        id="openai",
+        name="OpenAI",
+        protocol="openai",
+        base_url="https://api.openai.com",
+        api_key="sk-secret",
+    )
+    d = p.to_dict(include_key=False)
+    assert d["api_key"] == "***"
+
+
+def test_provider_config_from_dict_ignores_legacy_models_field():
+    d = {
+        "id": "openai",
+        "name": "OpenAI",
+        "protocol": "openai",
+        "base_url": "https://api.openai.com",
+        "api_key": "sk-secret",
+        "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],  # legacy, ignored
+        "health": {"status": "up", "latency_ms": 12.5},
+    }
+    p = ProviderConfig.from_dict(d)
+    assert p.id == "openai"
+    assert not hasattr(p, "models")
+    assert p.health.status == "up"
+    assert p.health.latency_ms == 12.5

@@ -7,6 +7,7 @@ from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, ListView, ListItem, Label, Button, Input, LoadingIndicator
 from textual.screen import ModalScreen
 from textual.binding import Binding
+from textual.events import Key
 
 from llmport.daemon import DaemonManager
 from llmport.ui import async_get_json
@@ -105,10 +106,29 @@ class ModelDetailScreen(ModalScreen):
 class ModelsPane(Vertical):
     """Models list with current active model highlighted."""
 
+    DEFAULT_CSS = """
+    ModelsPane {
+        overflow-y: auto;
+    }
+    #model-actions {
+        dock: bottom;
+        height: auto;
+    }
+    /* LoadingIndicator defaults to height: 1fr, which (even while hidden via
+       visible=False) breaks the dock layout and pushes the whole pane's content
+       off-screen. Pin it to a single row and toggle `display` instead of
+       `visible` so it is fully removed from the flow once the first refresh
+       completes. */
+    #loading-indicator {
+        height: 1;
+    }
+    """
+
     BINDINGS = [
         Binding("delete", "delete_model", "删除", show=True),
         Binding("backspace", "delete_model", "", show=False),
         Binding("n", "switch_next", "切换", show=True),
+        Binding("/", "focus_search", "搜索", show=True),
     ]
 
     def __init__(self):
@@ -141,8 +161,10 @@ class ModelsPane(Vertical):
         status = await daemon.async_get_status()
         port = daemon.get_control_port()
 
-        # Always hide loading indicator after refresh completes (success or not)
-        self.query_one("#loading-indicator", LoadingIndicator).visible = False
+        # Always hide loading indicator after refresh completes (success or not).
+        # Use `display` (not `visible`) so it leaves the layout flow entirely;
+        # an h=0-but-in-flow LoadingIndicator corrupts the pane's dock layout.
+        self.query_one("#loading-indicator", LoadingIndicator).styles.display = "none"
 
         if port is None:
             empty = self.query_one("#empty-state", Static)
@@ -167,56 +189,136 @@ class ModelsPane(Vertical):
         self.query_one("#active-info", Static).update(f"当前活跃: [bold $primary]{active_display}[/]")
         self.query_one("#active-info", Static).visible = True
 
-        # Toggle list-view / empty-state
+        # Rebuild the list. Shared with on_input_changed so a background refresh
+        # reapplies the active search filter and preserves the current selection
+        # instead of wiping them.
+        await self._render_list()
+
+    async def _render_list(self) -> None:
+        """Rebuild the ListView from ``self.models``.
+
+        Applies the current search filter and preserves the selected model (by
+        id) across the rebuild. Shared by ``refresh_models`` (after a data
+        fetch) and ``on_input_changed`` (while typing a query), so the 5s
+        background refresh never clears the active filter or the user's
+        selection.
+        """
+        list_view = self.query_one("#model-list", ListView)
         empty_container = self.query_one("#empty-state-container", Container)
         empty = self.query_one("#empty-state", Static)
-        list_view = self.query_one("#model-list", ListView)
-        await list_view.clear()
-        if not self.models:
-            empty.update("暂无模型 — 请先在供应商页添加 Provider")
-            empty_container.visible = True
-            self.query_one("#btn-start-gateway", Button).visible = False
-            list_view.visible = False
-        else:
-            empty_container.visible = False
-            list_view.visible = True
-            for m in self.models:
-                if m["id"] == self.active_model:
-                    text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"
-                else:
-                    text = f"  {m['id']}   [dim]({m['provider_count']} 供应商)[/]"
-                list_view.append(ListItem(Label(text)))
+        start_btn = self.query_one("#btn-start-gateway", Button)
 
-        self._filtered_models = list(self.models)
+        # Remember the selected model id so we can restore it after rebuild.
+        selected_id: str | None = None
+        if list_view.index is not None and list_view.index < len(self._filtered_models):
+            selected_id = self._filtered_models[list_view.index].get("id")
+
+        query = self._current_query()
+        filtered = (
+            [m for m in self.models if query in m["id"].lower()] if query else list(self.models)
+        )
+        self._filtered_models = filtered
+
+        await list_view.clear()
+        # btn-start-gateway only belongs to the gateway-not-running state
+        # (handled in refresh_models); keep it hidden otherwise.
+        start_btn.visible = False
+
+        if not filtered:
+            empty.update("无匹配模型" if query else "暂无模型 - 请先在供应商页添加 Provider")
+            empty_container.visible = True
+            list_view.visible = False
+            return
+
+        empty_container.visible = False
+        list_view.visible = True
+        new_index: int | None = None
+        for i, m in enumerate(filtered):
+            if m["id"] == self.active_model:
+                text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"
+            else:
+                text = f"  {m['id']}   [dim]({m['provider_count']} 供应商)[/]"
+            list_view.append(ListItem(Label(text)))
+            if m["id"] == selected_id:
+                new_index = i
+        # Restore selection if the model is still present; else leave unselected.
+        list_view.index = new_index
+
+    def _current_query(self) -> str:
+        """Lowercased current search query (empty string if none/empty)."""
+        try:
+            return self.query_one("#model-search", Input).value.strip().lower()
+        except Exception:
+            return ""
 
     async def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter model list by search query."""
-        query = event.value.strip().lower()
-        empty_container = self.query_one("#empty-state-container", Container)
-        empty = self.query_one("#empty-state", Static)
+        """Filter model list by search query (live, as the user types)."""
+        if event.input.id == "model-search":
+            await self._render_list()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the search box: switch to the highlighted model (fzf-style),
+        or focus the list if nothing is selected yet."""
+        if event.input.id != "model-search":
+            return
         list_view = self.query_one("#model-list", ListView)
-        await list_view.clear()
-        filtered = [m for m in self.models if query in m["id"].lower()] if query else self.models
-        if not filtered and query:
-            empty.update("无匹配模型")
-            empty_container.visible = True
-            self.query_one("#btn-start-gateway", Button).visible = False
-            list_view.visible = False
-        elif not filtered:
-            empty.update("暂无模型 — 请先在供应商页添加 Provider")
-            empty_container.visible = True
-            self.query_one("#btn-start-gateway", Button).visible = False
-            list_view.visible = False
+        if (
+            list_view.index is not None
+            and list_view.index < len(self._filtered_models)
+        ):
+            model_id = self._filtered_models[list_view.index]["id"]
+            await self._switch_model_via_api(model_id, cast("LlmPortApp", self.app).daemon)
         else:
-            empty_container.visible = False
-            list_view.visible = True
-            for m in filtered:
-                if m["id"] == self.active_model:
-                    text = f"[green]▶[/] [bold $primary]{m['id']}[/]   [dim]({m['provider_count']} 供应商)[/]"
-                else:
-                    text = f"  {m['id']}   [dim]({m['provider_count']} 供应商)[/]"
-                list_view.append(ListItem(Label(text)))
-        self._filtered_models = list(filtered) if filtered else []
+            list_view.focus()
+
+    def on_key(self, event: Key) -> None:
+        """Let ↑/↓ navigate the result list while the search box is focused.
+
+        Without this, up/down do nothing in the search Input (it is single
+        line), so there's no way to pick a filtered result without first
+        tabbing into the list. Here we move the list selection directly so the
+        user can type to filter, arrow to pick, and Enter to switch -- all
+        without leaving the search box.
+        """
+        if event.key not in ("up", "down"):
+            return
+        search = self.query_one("#model-search", Input)
+        if self.app.focused is not search:
+            return  # let the list handle its own up/down natively
+        list_view = self.query_one("#model-list", ListView)
+        if not list_view.visible or not len(list_view.children):
+            return
+        event.prevent_default()
+        event.stop()
+        n = len(list_view.children)
+        # Start above the first when going down, below the last when going up,
+        # so the first down selects item 0 and the first up selects the last.
+        cur = list_view.index if list_view.index is not None else (
+            -1 if event.key == "down" else n
+        )
+        if event.key == "down":
+            list_view.index = min(cur + 1, n - 1)
+        else:
+            list_view.index = max(cur - 1, 0)
+
+    def action_focus_search(self) -> None:
+        """Binding: / - jump focus to the search input so you can type to filter."""
+        self.query_one("#model-search", Input).focus()
+
+    def focus_list(self) -> None:
+        """Focus the model list.
+
+        Used to restore keyboard focus when the models tab is re-activated --
+        switching tabs leaves focus None, so without this ↑/↓/Enter would do
+        nothing until the user clicked or tabbed back into the list.
+        """
+        list_view = self.query_one("#model-list", ListView)
+        if list_view.visible:
+            list_view.focus()
+        else:
+            # List hidden (e.g. gateway not running) -> focus the search box instead.
+            self.query_one("#model-search", Input).focus()
+
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-start-gateway":

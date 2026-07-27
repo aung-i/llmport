@@ -17,13 +17,11 @@ from starlette.routing import Route
 
 from llmport.config.store import ConfigStore
 from llmport.models.provider import ProviderConfig
-from llmport.models.model import merge_aliases_into_logical_models
 from llmport.gateway.router import Router, RouterError
-from llmport.gateway.state import migrate_gateway_config, GatewayState, init_state, get_state
+from llmport.gateway.state import GatewayState, init_state, get_state
 from llmport.gateway import openai_handler, anthropic_handler
 from llmport.gateway.control_api import (
     control_status,
-    control_switch_model,
     control_models,
     control_models_delete,
     control_providers,
@@ -136,18 +134,19 @@ async def openai_chat(request: Request) -> Response:
     """POST /openai/v1/chat/completions (and SDK alias ``/v1/chat/completions``)."""
     state = get_state()
     router = state.get_router()
+    body = await request.json()
+    requested = body.get("model")
     try:
-        provider, model_name = router.resolve()
+        provider, model_name = router.resolve(requested)
     except RouterError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
     if provider.protocol != "openai":
         return JSONResponse(
-            {"error": f"Model '{state.active_model_id}' is on an Anthropic provider, not OpenAI"},
+            {"error": f"Model {requested!r} is on an Anthropic provider, not OpenAI"},
             status_code=400,
         )
 
-    body = await request.json()
     is_stream = body.get("stream", False)
 
     if is_stream:
@@ -173,7 +172,7 @@ async def openai_chat(request: Request) -> Response:
 
                 # Find next fallback with matching protocol
                 while True:
-                    fb = router.try_fallback(last_id)
+                    fb = router.try_fallback(requested, last_id)
                     if not fb:
                         yield first_chunk  # all exhausted
                         return
@@ -194,7 +193,7 @@ async def openai_chat(request: Request) -> Response:
         if error:
             last_id = provider.id
             while True:
-                fb = router.try_fallback(last_id)
+                fb = router.try_fallback(requested, last_id)
                 if not fb:
                     break
                 fb_provider, fb_model = fb
@@ -216,12 +215,12 @@ async def openai_chat(request: Request) -> Response:
 
 
 async def openai_models(request: Request) -> Response:
-    """Return a filtered list of models available on the active route."""
+    """Return the list of model names the gateway can route to."""
     state = get_state()
     return JSONResponse({
         "object": "list",
         "data": [
-            {"id": m.id, "object": "model"}
+            {"id": m.name, "object": "model"}
             for m in state.models
         ],
     })
@@ -239,18 +238,28 @@ async def openai_catchall(request: Request) -> Response:
     """
     state = get_state()
     router = state.get_router()
+
+    # Catchall forwards arbitrary OpenAI endpoints (e.g. /v1/embeddings).
+    # The model must be present in the JSON body so we can route it.
     try:
-        provider, model_name = router.resolve()
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"error": "Request body must be JSON with a 'model' field"},
+            status_code=400,
+        )
+    requested = body.get("model")
+    try:
+        provider, model_name = router.resolve(requested)
     except RouterError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
     if provider.protocol != "openai":
         return JSONResponse(
-            {"error": "Active model is not on an OpenAI provider"},
+            {"error": f"Model {requested!r} is not on an OpenAI provider"},
             status_code=400,
         )
 
-    body = await request.body()
     path = request.url.path
 
     async def generate():
@@ -271,18 +280,19 @@ async def anthropic_messages(request: Request) -> Response:
     """POST /anthropic/v1/messages (and SDK alias ``/v1/messages``)."""
     state = get_state()
     router = state.get_router()
+    body = await request.json()
+    requested = body.get("model")
     try:
-        provider, model_name = router.resolve()
+        provider, model_name = router.resolve(requested)
     except RouterError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
     if provider.protocol != "anthropic":
         return JSONResponse(
-            {"error": f"Model '{state.active_model_id}' is on an OpenAI provider, not Anthropic"},
+            {"error": f"Model {requested!r} is on an OpenAI provider, not Anthropic"},
             status_code=400,
         )
 
-    body = await request.json()
     is_stream = body.get("stream", False)
 
     if is_stream:
@@ -308,7 +318,7 @@ async def anthropic_messages(request: Request) -> Response:
 
                 # Find next fallback with matching protocol
                 while True:
-                    fb = router.try_fallback(last_id)
+                    fb = router.try_fallback(requested, last_id)
                     if not fb:
                         yield first_chunk  # all exhausted
                         return
@@ -329,7 +339,7 @@ async def anthropic_messages(request: Request) -> Response:
         if error:
             last_id = provider.id
             while True:
-                fb = router.try_fallback(last_id)
+                fb = router.try_fallback(requested, last_id)
                 if not fb:
                     break
                 fb_provider, fb_model = fb
@@ -355,32 +365,27 @@ async def anthropic_messages(request: Request) -> Response:
 # ============================================================================
 
 
-def create_app(store: ConfigStore) -> tuple[Starlette, Starlette]:
-    """Create the gateway and control applications.
+def create_app(store: ConfigStore) -> Starlette:
+    """Create the gateway application.
 
-    Returns a ``(gateway_app, control_app)`` tuple:
-
-    - **gateway_app** — OpenAI and Anthropic protocol endpoints, including
-      SDK-compatible short paths (``/v1/chat/completions``).
-    - **control_app** — Control API endpoints (``/api/*``) only.
+    A single Starlette app serves both the protocol-forwarding routes
+    (``/openai/v1/*``, ``/anthropic/v1/*``, ``/v1/*``) and the control API
+    (``/api/*``) on one port.
     """
     init_state(store)
 
-    gateway_routes = [
+    routes = [
         # OpenAI protocol (explicit prefix + SDK short path)
         Route("/openai/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/openai/v1/models", openai_models, methods=["GET"]),
         Route("/openai/v1/{path:path}", openai_catchall, methods=["POST", "GET"]),
         # Anthropic protocol (explicit prefix + SDK short path)
         Route("/anthropic/v1/messages", anthropic_messages, methods=["POST"]),
-        # SDK-compatible alias paths (Issue #3)
+        # SDK-compatible alias paths
         Route("/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/v1/messages", anthropic_messages, methods=["POST"]),
-    ]
-
-    control_routes = [
+        # Control API
         Route("/api/status", control_status, methods=["GET"]),
-        Route("/api/models/switch", control_switch_model, methods=["POST"]),
         Route("/api/models", control_models, methods=["GET"]),
         Route("/api/models", control_models_delete, methods=["DELETE"]),
         Route("/api/providers", control_providers, methods=["GET", "POST", "DELETE"]),
@@ -391,4 +396,4 @@ def create_app(store: ConfigStore) -> tuple[Starlette, Starlette]:
         Route("/api/daemon/restart", control_daemon_restart, methods=["POST"]),
     ]
 
-    return Starlette(routes=gateway_routes), Starlette(routes=control_routes)
+    return Starlette(routes=routes)

@@ -121,3 +121,16 @@ class LlmPortApp(App):
             with TabPane("\U0001f527  设置", id="settings"):
                 yield SettingsPane()
         yield Footer()
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Re-focus the model list when the models tab is (re)activated.
+
+        Switching tabs leaves focus None, so without this keyboard navigation
+        (↑/↓/Enter) would be dead on return until the user clicks or tabs back
+        into the list.
+        """
+        if event.pane.id == "models":
+            try:
+                self.query_one(ModelsPane).focus_list()
+            except Exception:
+                pass

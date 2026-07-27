@@ -287,7 +287,7 @@ class TestModelsPane:
             # loading-indicator (LoadingIndicator) — hidden after refresh_models
             # completes (daemon port=None causes early return which hides it)
             loading = pane.query_one("#loading-indicator", LoadingIndicator)
-            assert loading.visible is False
+            assert loading.display is False
 
             # active-info (Static) — starts empty
             active_info = pane.query_one("#active-info", Static)
@@ -804,7 +804,7 @@ class TestModelsPane:
 
             # loading-indicator hidden because refresh_models hides it
             loading = pane.query_one("#loading-indicator", LoadingIndicator)
-            assert loading.visible is False
+            assert loading.display is False
 
             # empty-state shows gateway-not-running message
             empty_state = pane.query_one("#empty-state", Static)
@@ -1107,6 +1107,176 @@ class TestModelsPane:
             keys = {b.key for b in bindings}
             assert "delete" in keys, "Expected 'delete' binding for delete_model"
             assert "n" in keys, "Expected 'n' binding for switch_next"
+            assert "/" in keys, "Expected '/' binding for focus_search"
+
+    @pytest.mark.asyncio
+    async def test_action_focus_search_focuses_input(self, mock_daemon):
+        """action_focus_search (the '/' binding) moves focus to the search input."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            search = pane.query_one("#model-search", Input)
+
+            # From any starting focus, the action should land on the search input.
+            pane.action_focus_search()
+            await pilot.pause()
+            assert app.focused is search
+
+    @pytest.mark.asyncio
+    async def test_input_submitted_focuses_list(self, mock_daemon):
+        """Enter in the search box moves focus to the model list."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            pane.models = [
+                {"id": "gpt-4", "provider_count": 1},
+                {"id": "claude-3", "provider_count": 1},
+            ]
+            await pane._render_list()
+            await pilot.pause()
+
+            search = pane.query_one("#model-search", Input)
+            search.focus()
+            await pilot.pause()
+            assert app.focused is search
+
+            # Simulate Enter in the search input.
+            search.post_message(Input.Submitted(search, search.value))
+            await pilot.pause()
+            assert app.focused is pane.query_one("#model-list", ListView)
+
+    @pytest.mark.asyncio
+    async def test_render_list_preserves_selection(self, mock_daemon):
+        """_render_list keeps the selected model highlighted across a rebuild."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            pane.models = [
+                {"id": "gpt-4", "provider_count": 1},
+                {"id": "claude-3", "provider_count": 1},
+                {"id": "gpt-4o", "provider_count": 1},
+            ]
+            await pane._render_list()
+            await pilot.pause()
+
+            list_view = pane.query_one("#model-list", ListView)
+            list_view.index = 1  # select claude-3
+            await pilot.pause()
+
+            # Rebuild (e.g. a background refresh); selection should be preserved.
+            await pane._render_list()
+            await pilot.pause()
+            assert list_view.index == 1
+            assert pane._filtered_models[list_view.index]["id"] == "claude-3"
+
+    @pytest.mark.asyncio
+    async def test_refresh_models_preserves_search_filter(self):
+        """A background refresh re-applies the active search filter instead of
+        wiping it (the search box still shows the query; the list stays filtered)."""
+        mock_daemon = MagicMock(spec=DaemonManager)
+        mock_daemon.get_control_port.return_value = 9999
+        mock_daemon.async_get_status = AsyncMock(
+            return_value={"running": True, "active_model": "gpt-4"}
+        )
+        app = _PaneHostApp(daemon=mock_daemon)
+
+        with patch("llmport.ui.screens.models.async_get_json") as mock_get_json:
+            mock_get_json.side_effect = [
+                {"active_model": "gpt-4"},  # /api/status
+                [  # /api/models
+                    {"id": "gpt-4", "provider_count": 1},
+                    {"id": "gpt-4o", "provider_count": 1},
+                    {"id": "claude-3", "provider_count": 1},
+                ],
+            ]
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                pane = app.query_one(ModelsPane)
+                list_view = pane.query_one("#model-list", ListView)
+                assert len(list_view.children) == 3
+
+                # Type a filter that matches 2 of 3.
+                search = pane.query_one("#model-search", Input)
+                search.value = "gpt"
+                await pilot.pause()
+                assert len(list_view.children) == 2
+
+                # A second refresh fetches the same data; the filter must persist.
+                mock_get_json.side_effect = [
+                    {"active_model": "gpt-4"},
+                    [
+                        {"id": "gpt-4", "provider_count": 1},
+                        {"id": "gpt-4o", "provider_count": 1},
+                        {"id": "claude-3", "provider_count": 1},
+                    ],
+                ]
+                await pane.refresh_models()
+                await pilot.pause()
+                assert search.value == "gpt"
+                assert len(list_view.children) == 2  # still filtered, not 3
+
+    @pytest.mark.asyncio
+    async def test_on_key_down_in_search_navigates_list(self, mock_daemon):
+        """While the search box is focused, ↑/↓ move the list selection so the
+        user can pick a filtered result without leaving the search box."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            pane.models = [
+                {"id": "gpt-4", "provider_count": 1},
+                {"id": "claude-3", "provider_count": 1},
+                {"id": "gpt-4o", "provider_count": 1},
+            ]
+            search = pane.query_one("#model-search", Input)
+            search.focus()
+            await pane._render_list()
+            await pilot.pause()
+            list_view = pane.query_one("#model-list", ListView)
+            assert list_view.index is None
+
+            # down twice moves selection down; focus stays on the search input.
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 0
+            assert app.focused is search
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 1
+            assert app.focused is search
+
+            # up moves back up.
+            await pilot.press("up")
+            await pilot.pause()
+            assert list_view.index == 0
+
+    @pytest.mark.asyncio
+    async def test_on_key_up_down_native_when_list_focused(self, mock_daemon):
+        """When the list itself is focused, native ↑/↓ still work (the search
+        shortcut doesn't swallow them)."""
+        app = _PaneHostApp(daemon=mock_daemon)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            pane = app.query_one(ModelsPane)
+            pane.models = [
+                {"id": "gpt-4", "provider_count": 1},
+                {"id": "claude-3", "provider_count": 1},
+            ]
+            await pane._render_list()
+            list_view = pane.query_one("#model-list", ListView)
+            list_view.focus()
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 0
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 1
 
     # -- action_delete_model -------------------------------------------
 

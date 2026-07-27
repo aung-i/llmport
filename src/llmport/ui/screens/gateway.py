@@ -98,6 +98,16 @@ class GatewayConfigScreen(ModalScreen):
 class GatewayPane(Vertical):
     """Gateway status and control panel."""
 
+    DEFAULT_CSS = """
+    GatewayPane {
+        overflow-y: auto;
+    }
+    #gateway-actions {
+        dock: bottom;
+        height: auto;
+    }
+    """
+
     def compose(self) -> ComposeResult:
         with Section("网关状态"):
             yield Static("加载中...", id="gateway-status")

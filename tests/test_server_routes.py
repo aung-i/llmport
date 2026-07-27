@@ -1,8 +1,12 @@
 """Tests for ``create_app()`` and route handlers in ``server.py``.
 
 Uses the existing pattern from ``test_gateway.py``: creates a real
-``ConfigStore`` with a temporary directory, registers a single provider,
-and exercises the app through ``starlette.testclient.TestClient``.
+``ConfigStore`` with a temporary directory, registers a single provider
+and a logical model, and exercises the app through
+``starlette.testclient.TestClient``.
+
+Routing is by the client-sent ``model`` field, so chat requests must
+include ``"model": "gpt5"``.
 """
 
 import tempfile
@@ -14,26 +18,43 @@ from llmport.config.store import ConfigStore
 from llmport.gateway import server as gateway_server
 
 
-_BASE_PROVIDER = {
-    "id": "test-p",
-    "name": "Test",
-    "protocol": "openai",
-    "base_url": "https://api.example.com",
-    "api_key": "sk-test",
-    "models": [{"name": "gpt-5", "aliases": ["gpt5"]}],
+_BASE_CONFIG = {
+    "version": 1,
+    "gateway": {"host": "127.0.0.1", "port": 11434},
+    "providers": [
+        {
+            "id": "test-p",
+            "name": "Test",
+            "protocol": "openai",
+            "base_url": "https://api.example.com",
+        },
+    ],
+    "models": [
+        {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
+    ],
 }
 
 
 def _make_app(tmp: str):
-    """Create a gateway app with one OpenAI provider. Returns the gateway app."""
+    """Create the gateway app with one OpenAI provider and a 'gpt5' model.
+
+    ``create_app`` returns a single Starlette app serving both protocol
+    and control routes.
+    """
     store = ConfigStore(tmp)
     store.init_first_run()
-    data = store.load()
-    data["providers"].append(_BASE_PROVIDER)
-    data["active_model"] = "gpt5"
-    store.save(data)
-    gateway_app, _control_app = gateway_server.create_app(store)
-    return gateway_app
+    store.save_config(_BASE_CONFIG)
+    store.save_secrets({"test-p": "sk-test"})
+    return gateway_server.create_app(store)
+
+
+def _make_store(tmp: str):
+    """Create an initialised ConfigStore with the base provider/model."""
+    store = ConfigStore(tmp)
+    store.init_first_run()
+    store.save_config(_BASE_CONFIG)
+    store.save_secrets({"test-p": "sk-test"})
+    return store
 
 
 # ============================================================================
@@ -43,58 +64,27 @@ def _make_app(tmp: str):
 class TestCreateApp:
     """Verify the application factory registers all expected routes."""
 
-    def test_returns_two_starlette_apps(self):
-        """create_app returns a (gateway, control) tuple of Starlette apps."""
+    def test_returns_single_starlette_app(self):
+        """create_app returns one Starlette app (not a tuple)."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            gw, ctrl = gateway_server.create_app(store)
+            app = gateway_server.create_app(_make_store(tmp))
 
-            assert gw is not None
-            assert ctrl is not None
-            assert gw.__class__.__name__ == "Starlette"
-            assert ctrl.__class__.__name__ == "Starlette"
+            assert app is not None
+            assert app.__class__.__name__ == "Starlette"
 
-    def test_gateway_has_correct_route_count(self):
-        """Gateway app has 6 routes (chat, models, catchall, messages, SDK aliases)."""
+    def test_app_has_correct_route_count(self):
+        """The single app has 15 routes (6 protocol + 9 control registrations,
+        where /api/models is registered twice for GET and DELETE)."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            gw, _ctrl = gateway_server.create_app(store)
-            assert len(gw.routes) == 6
+            app = gateway_server.create_app(_make_store(tmp))
+            assert len(app.routes) == 15
 
-    def test_control_has_correct_route_count(self):
-        """Control app has 9 routes."""
+    def test_protocol_route_paths_present(self):
+        """Each expected protocol route path is registered."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            _gw, ctrl = gateway_server.create_app(store)
-            assert len(ctrl.routes) == 10
+            app = gateway_server.create_app(_make_store(tmp))
 
-    def test_gateway_route_paths_present(self):
-        """Each expected gateway route path is registered."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            gw, _ctrl = gateway_server.create_app(store)
-
-            paths = {r.path for r in gw.routes}
+            paths = {r.path for r in app.routes}
             assert "/openai/v1/chat/completions" in paths
             assert "/openai/v1/models" in paths
             assert "/openai/v1/{path:path}" in paths
@@ -103,19 +93,12 @@ class TestCreateApp:
             assert "/v1/messages" in paths
 
     def test_control_route_paths_present(self):
-        """Each expected control route path is registered."""
+        """Each expected control route path is registered (no /api/models/switch)."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            _gw, ctrl = gateway_server.create_app(store)
+            app = gateway_server.create_app(_make_store(tmp))
 
-            paths = {r.path for r in ctrl.routes}
+            paths = {r.path for r in app.routes}
             assert "/api/status" in paths
-            assert "/api/models/switch" in paths
             assert "/api/models" in paths
             assert "/api/providers" in paths
             assert "/api/providers/test" in paths
@@ -123,46 +106,119 @@ class TestCreateApp:
             assert "/api/gateway/config" in paths
             assert "/api/daemon/stop" in paths
             assert "/api/daemon/restart" in paths
+            # The old /api/models/switch route has been removed.
+            assert "/api/models/switch" not in paths
 
-    def test_gateway_routes_have_correct_methods(self):
+    def test_routes_have_correct_methods(self):
         """Verify key routes have the expected HTTP method constraints."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            gw, _ctrl = gateway_server.create_app(store)
+            app = gateway_server.create_app(_make_store(tmp))
 
             by_path = {}
-            for r in gw.routes:
-                by_path[r.path] = r
+            for r in app.routes:
+                by_path.setdefault(r.path, []).append(r)
 
-            chat = by_path["/openai/v1/chat/completions"]
+            chat = by_path["/openai/v1/chat/completions"][0]
             assert chat.methods == {"POST"}
 
-            models = by_path["/openai/v1/models"]
+            models = by_path["/openai/v1/models"][0]
             # Starlette auto-adds HEAD for any GET route
             assert "GET" in models.methods
 
-            catchall = by_path["/openai/v1/{path:path}"]
+            catchall = by_path["/openai/v1/{path:path}"][0]
             assert "POST" in catchall.methods
             assert "GET" in catchall.methods
 
+            # /api/models is registered for both GET and DELETE.
+            models_methods = set()
+            for r in by_path["/api/models"]:
+                models_methods |= r.methods
+            assert "GET" in models_methods
+            assert "DELETE" in models_methods
+
     def test_init_state_called(self):
-        """create_app calls init_state so get_state() works afterwards."""
+        """create_app calls init_state so get_state() works afterwards.
+
+        State has no ``active_model_id`` anymore (routing is by client-sent
+        model field).
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            gateway_server.create_app(store)
+            gateway_server.create_app(_make_store(tmp))
             state = gateway_server.get_state()
             assert state is not None
-            assert state.active_model_id == "gpt5"
+            assert not hasattr(state, "active_model_id")
+            # The configured model is exposed via state.models.
+            assert [m.name for m in state.models] == ["gpt5"]
+
+
+# ============================================================================
+# Routing by client-sent model field
+# ============================================================================
+
+class TestModelRouting:
+    """Chat endpoints route by the ``model`` field in the JSON body."""
+
+    def test_missing_model_returns_400(self):
+        """A chat request without a 'model' field returns 400."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.post("/openai/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+            assert resp.status_code == 400
+            assert "model" in resp.json()["error"]
+
+    def test_unknown_model_returns_400(self):
+        """A chat request with an unknown model name returns 400."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.post("/openai/v1/chat/completions", json={
+                "model": "does-not-exist",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+            assert resp.status_code == 400
+            assert "Unknown model" in resp.json()["error"]
+
+    def test_known_model_forwards_to_handler(self):
+        """A chat request with a known model forwards to openai_handler."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            success = {
+                "id": "x",
+                "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant",
+                            "content": "hi"}}],
+            }
+            with patch(
+                "llmport.gateway.server.openai_handler.forward",
+                new=AsyncMock(return_value=(success, None)),
+            ):
+                resp = client.post("/openai/v1/chat/completions", json={
+                    "model": "gpt5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                })
+            assert resp.status_code == 200
+            assert resp.json() == success
+
+    def test_sdk_alias_path_routes_chat(self):
+        """The /v1/chat/completions SDK alias also routes by model."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            success = {"id": "x", "object": "chat.completion", "choices": []}
+            with patch(
+                "llmport.gateway.server.openai_handler.forward",
+                new=AsyncMock(return_value=(success, None)),
+            ):
+                resp = client.post("/v1/chat/completions", json={
+                    "model": "gpt5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                })
+            assert resp.status_code == 200
+            assert resp.json() == success
 
 
 # ============================================================================
@@ -192,7 +248,7 @@ class TestOpenaiModels:
             assert isinstance(body["data"], list)
 
     def test_returns_available_models(self):
-        """Each model from state.models appears in the response."""
+        """Each model from state.models appears in the response, keyed by name."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
@@ -200,7 +256,7 @@ class TestOpenaiModels:
             body = resp.json()
 
             state = gateway_server.get_state()
-            expected_ids = {m.id for m in state.models}
+            expected_ids = {m.name for m in state.models}
             returned_ids = {m["id"] for m in body["data"]}
             assert returned_ids == expected_ids
 
@@ -215,13 +271,13 @@ class TestOpenaiModels:
                 assert "id" in entry
                 assert entry["object"] == "model"
 
-    def test_models_via_sdk_alias(self):
+    def test_models_via_sdk_alias_not_registered(self):
         """The SDK alias /v1/models is not registered (only openai prefix)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
             resp = client.get("/v1/models")
-            # No route registered -> 405 (method not allowed) or 404
+            # No route registered -> 404
             assert resp.status_code == 404
 
     def test_post_to_unknown_path_returns_404(self):
@@ -234,15 +290,18 @@ class TestOpenaiModels:
             assert resp.status_code == 404
 
     def test_no_models_returns_empty_list(self):
-        """When no providers/models are configured, data is empty."""
+        """When no models are configured, data is empty."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
-            # Don't add any providers — models list will be empty
-            data = store.load()
-            data["active_model"] = "gpt5"
-            store.save(data)
-            app, _ctrl = gateway_server.create_app(store)
+            store.save_config({
+                "version": 1,
+                "gateway": {"host": "127.0.0.1", "port": 11434},
+                "providers": [],
+                "models": [],
+            })
+            store.save_secrets({})
+            app = gateway_server.create_app(store)
             client = TestClient(app)
             resp = client.get("/openai/v1/models")
             assert resp.status_code == 200
@@ -250,36 +309,89 @@ class TestOpenaiModels:
             assert body["data"] == []
 
 
+# ============================================================================
+# DELETE /api/models
+# ============================================================================
+
 class TestControlModelsDelete:
     """Test the DELETE /api/models endpoint."""
 
-    def test_delete_model_returns_ok(self):
-        """DELETE /api/models with valid model_id returns ok."""
-        import tempfile
+    def test_delete_model_by_name_returns_ok(self):
+        """DELETE /api/models with a valid 'name' returns ok."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            data["active_model"] = "gpt5"
-            store.save(data)
-            _gw, ctrl = gateway_server.create_app(store)
-            client = TestClient(ctrl)
-            resp = client.request("DELETE", "/api/models", json={"model_id": "gpt5"})
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.request("DELETE", "/api/models", json={"name": "gpt5"})
             assert resp.status_code == 200
             body = resp.json()
             assert body["ok"] is True
 
-    def test_delete_model_missing_id_returns_400(self):
-        """DELETE /api/models without model_id returns 400."""
-        import tempfile
+    def test_delete_model_by_model_id_returns_ok(self):
+        """DELETE /api/models also accepts 'model_id' for back-compat."""
         with tempfile.TemporaryDirectory() as tmp:
-            store = ConfigStore(tmp)
-            store.init_first_run()
-            data = store.load()
-            data["providers"].append(_BASE_PROVIDER)
-            store.save(data)
-            _gw, ctrl = gateway_server.create_app(store)
-            client = TestClient(ctrl)
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.request("DELETE", "/api/models",
+                                  json={"model_id": "gpt5"})
+            assert resp.status_code == 200
+            assert resp.json()["ok"] is True
+
+    def test_delete_model_missing_name_returns_400(self):
+        """DELETE /api/models without a name returns 400."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
             resp = client.request("DELETE", "/api/models", json={})
+            assert resp.status_code == 400
+
+    def test_delete_model_removes_from_state(self):
+        """After deletion the model no longer appears in /api/models."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.request("DELETE", "/api/models", json={"name": "gpt5"})
+            assert resp.status_code == 200
+            models = client.get("/api/models").json()["models"]
+            assert all(m["name"] != "gpt5" for m in models)
+
+
+class TestOpenaiCatchall:
+    """The /openai/v1/{path} catchall forwards arbitrary OpenAI endpoints."""
+
+    def test_forwards_arbitrary_endpoint(self):
+        """A JSON request with a known model is streamed through to the handler."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+
+            async def fake_stream(body, provider, model_name, path):
+                yield b"data: ok\n\n"
+
+            with patch(
+                "llmport.gateway.server.openai_handler.stream",
+                side_effect=fake_stream,
+            ):
+                resp = client.post(
+                    "/openai/v1/embeddings",
+                    json={"model": "gpt5", "input": "x"},
+                )
+            assert resp.status_code == 200
+            assert b"data: ok" in resp.content
+
+    def test_non_json_body_returns_400(self):
+        """A non-JSON body is rejected with 400 (model cannot be read)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.post("/openai/v1/embeddings", content=b"not-json")
+            assert resp.status_code == 400
+
+    def test_unknown_model_returns_400(self):
+        """An unknown model in the catchall body returns 400."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp)
+            client = TestClient(app)
+            resp = client.post(
+                "/openai/v1/embeddings", json={"model": "nope"}
+            )
             assert resp.status_code == 400

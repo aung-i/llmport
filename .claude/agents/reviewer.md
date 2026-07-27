@@ -10,18 +10,7 @@ tools: Read, Glob, Grep, Skill
 
 收到 developer 和 tester 的交付后，**调用 `Skill("code-review:code-review")`** 进行多代理审查。
 
-该 skill 会启动 5 个并行 agent：
-1. CLAUDE.md 合规性审查
-2. 浅层 bug 扫描
-3. Git blame 历史上下文
-4. 过往 PR 评论交叉检查
-5. 代码注释合规
-
-然后对发现的问题评分（0-100），只保留 ≥80 分的真实问题。
-
 ## 输出
-
-Skill 执行完后，汇总审查结果：
 
 ```markdown
 ## Review Report

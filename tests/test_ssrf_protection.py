@@ -60,7 +60,13 @@ class TestValidatePublicUrl:
 
     def test_accepts_public_domain(self):
         from llmport.gateway.ip_utils import validate_public_url
-        assert validate_public_url("https://api.openai.com/v1/chat") is True
+        # Mock DNS so the test is deterministic (live DNS can return sandbox
+        # addresses that flake the result).
+        with patch(
+            "llmport.gateway.ip_utils._resolve_hostname",
+            return_value=["199.59.148.201"],
+        ):
+            assert validate_public_url("https://api.openai.com/v1/chat") is True
 
     def test_accepts_public_ip(self):
         from llmport.gateway.ip_utils import validate_public_url
@@ -118,3 +124,28 @@ class TestHandlerBaseAllowRedirects:
         assert "allow_redirects=False" in source, (
             "stream() must use allow_redirects=False for SSRF protection"
         )
+
+
+class TestResolveHostname:
+    """_resolve_hostname() - deterministic, no live DNS."""
+
+    def test_resolves_via_getaddrinfo(self):
+        from llmport.gateway import ip_utils
+        fake = [
+            (None, None, None, None, ("8.8.8.8", 0)),
+            (None, None, None, None, ("1.1.1.1", 0)),
+            (None, None, None, None, ("8.8.8.8", 0)),  # dup, deduped
+        ]
+        with patch.object(ip_utils.socket, "getaddrinfo", return_value=fake):
+            assert ip_utils._resolve_hostname("example.com") == ["8.8.8.8", "1.1.1.1"]
+
+    def test_returns_empty_on_gaierror(self):
+        import socket as _socket
+        from llmport.gateway import ip_utils
+        with patch.object(ip_utils.socket, "getaddrinfo",
+                          side_effect=_socket.gaierror):
+            assert ip_utils._resolve_hostname("nonexistent.invalid") == []
+
+    def test_bare_ip_short_circuits(self):
+        from llmport.gateway.ip_utils import _resolve_hostname
+        assert _resolve_hostname("8.8.8.8") == ["8.8.8.8"]

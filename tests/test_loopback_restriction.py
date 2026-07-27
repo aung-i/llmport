@@ -16,8 +16,7 @@ from llmport.gateway.server import create_app
 def _make_control_app(tmp):
     store = ConfigStore(tmp)
     store.init_first_run()
-    _gw, control_app = create_app(store)
-    return control_app
+    return create_app(store)
 
 
 class TestLoopbackRestriction:

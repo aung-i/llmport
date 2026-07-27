@@ -325,6 +325,16 @@ class ProviderFormScreen(ModalScreen):
 class ProvidersPane(Vertical):
     """Provider management panel."""
 
+    DEFAULT_CSS = """
+    ProvidersPane {
+        overflow-y: auto;
+    }
+    #provider-actions {
+        dock: bottom;
+        height: auto;
+    }
+    """
+
     BINDINGS = [
         Binding("delete", "delete_provider", "删除", show=True),
         Binding("backspace", "delete_provider", "", show=False),

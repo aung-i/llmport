@@ -17,45 +17,42 @@ from llmport.gateway.server import create_app
 # Helpers
 # ---------------------------------------------------------------------------
 
-OPENAI_PROVIDER_TPL = {
-    "name": "Provider",
-    "protocol": "openai",
-    "base_url": "https://api.example.com",
-    "api_key": "sk-test",
-    "models": [{"name": "model-{id}", "aliases": ["m"]}],
-}
-
-ANTHROPIC_PROVIDER_TPL = {
-    "name": "Provider",
-    "protocol": "anthropic",
-    "base_url": "https://api.anthropic.com",
-    "api_key": "sk-ant-test",
-    "models": [{"name": "model-{id}", "aliases": ["m"]}],
-}
-
-
-def _make_providers(specs: list[tuple[str, str]]) -> list[dict]:
-    """Build provider dicts from (id, protocol) pairs."""
-    return [
-        {
-            "id": pid,
-            **({**OPENAI_PROVIDER_TPL, "models": [{"name": f"model-{pid}", "aliases": ["m"]}]}
-               if proto == "openai" else
-               {**ANTHROPIC_PROVIDER_TPL, "models": [{"name": f"model-{pid}", "aliases": ["m"]}]}),
-        }
-        for pid, proto in specs
-    ]
-
 
 def _make_app(tmp, provider_specs: list[tuple[str, str]]):
-    """Create an app with providers built from (id, protocol) specs."""
+    """Create an app with providers built from (id, protocol) specs.
+
+    A single logical model ``"m"`` is configured with bindings to every
+    provider in priority order, so the fallback chain visits them in
+    sequence (p1 priority 1, p2 priority 2, ...).
+    """
     store = ConfigStore(tmp)
     store.init_first_run()
-    data = store.load()
-    data["providers"] = _make_providers(provider_specs)
-    data["active_model"] = "m"
-    store.save(data)
-    return create_app(store)[0]  # gateway_app
+    config = store.load_config()
+    config["providers"] = [
+        {
+            "id": pid,
+            "name": f"Provider {pid}",
+            "protocol": proto,
+            "base_url": (
+                "https://api.example.com"
+                if proto == "openai"
+                else "https://api.anthropic.com"
+            ),
+        }
+        for pid, proto in provider_specs
+    ]
+    config["models"] = [
+        {
+            "name": "m",
+            "bindings": [
+                {"provider": pid, "upstream": f"model-{pid}", "priority": i + 1}
+                for i, (pid, _) in enumerate(provider_specs)
+            ],
+        }
+    ]
+    store.save_config(config)
+    store.save_secrets({pid: "sk-test" for pid, _ in provider_specs})
+    return create_app(store)
 
 # ---------------------------------------------------------------------------
 # Streaming fallback loop

@@ -40,14 +40,13 @@ async def stream(
 
 async def test_connection(
     provider: ProviderConfig,
+    model_name: str = "claude-sonnet-5",
 ) -> tuple[bool, float, str | None]:
     """Test connection to an Anthropic provider. Returns (ok, latency_ms, error)."""
     headers = _build_headers(provider)
     url = f"{provider.base_url.rstrip('/')}/v1/messages"
     body = {
-        "model": (
-            provider.models[0].name if provider.models else "claude-sonnet-5"
-        ),
+        "model": model_name,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "hi"}],
     }

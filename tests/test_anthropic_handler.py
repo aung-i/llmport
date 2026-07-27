@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from llmport.models.provider import ProviderConfig, ProviderModel
+from llmport.models.provider import ProviderConfig
 
 
 # ---------------------------------------------------------------------------
@@ -14,14 +14,14 @@ from llmport.models.provider import ProviderConfig, ProviderModel
 
 @pytest.fixture
 def provider() -> ProviderConfig:
-    return ProviderConfig(
+    p = ProviderConfig(
         id="anthropic",
         name="Anthropic",
         protocol="anthropic",
         base_url="https://api.anthropic.com",
         api_key="sk-ant-test-xyz",
-        models=[ProviderModel(name="claude-sonnet-5", aliases=["claude-sonnet"])],
     )
+    return p
 
 
 # ===========================================================================
@@ -137,7 +137,6 @@ async def test_test_connection_fallback_model(provider):
         protocol="anthropic",
         base_url="https://api.anthropic.com",
         api_key="sk-ant-test-xyz",
-        models=[],  # no models configured
     )
 
     mock_resp = MagicMock()
