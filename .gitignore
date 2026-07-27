@@ -18,3 +18,7 @@ config.enc
 .superpowers/
 .playwright-mcp/
 .coverage
+
+# Local agent/planning scratch
+.agents/
+.claude/plans/
