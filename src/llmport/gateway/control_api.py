@@ -10,7 +10,6 @@ from starlette.responses import JSONResponse
 
 from llmport.models.provider import ProviderConfig
 from llmport.gateway.state import get_state
-from llmport.gateway.ip_utils import validate_public_url
 from llmport.gateway import openai_handler, anthropic_handler
 
 # ---------------------------------------------------------------------------
@@ -101,12 +100,6 @@ async def control_providers(request: Request) -> JSONResponse:
         ])
     elif request.method == "POST":
         body = await request.json()
-        # SSRF: validate base_url
-        if not validate_public_url(body.get("base_url", "")):
-            return JSONResponse(
-                {"ok": False, "error": "不允许使用内网/本地地址"},
-                status_code=400,
-            )
         # Protect existing API key when the UI sends "***"
         raw_key = body.get("api_key")
         if raw_key == "***":

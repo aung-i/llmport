@@ -175,11 +175,11 @@ class DaemonManager:
         self._wait_for_exit(pid, 2.0)
         self._cleanup_pid()
 
-    def restart(self) -> None:
-        """Restart the daemon."""
+    def restart(self) -> bool:
+        """Restart the daemon. Returns True if it came back up."""
         self.stop()
         time.sleep(0.5)
-        self.start()
+        return self.start()
 
     # ------------------------------------------------------------------
     # Internal

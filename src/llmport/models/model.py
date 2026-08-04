@@ -68,22 +68,30 @@ def parse_models_config(models_data: list[dict] | None) -> list[LogicalModel]:
             continue
         strategy = entry.get("routing_strategy", "priority_fallback")
         if "bindings" in entry:
-            bindings = [
+            raw = entry.get("bindings") or []
+        else:
+            raw = [{
+                "provider": entry.get("provider"),
+                "upstream": entry.get("upstream"),
+                "priority": entry.get("priority", 1),
+            }]
+        bindings: list[ModelBinding] = []
+        for b in raw:
+            provider = b.get("provider")
+            upstream = b.get("upstream")
+            if not provider or not upstream:
+                # Skip a malformed binding (e.g. a hand-edited config typo)
+                # instead of crashing the daemon at startup with a KeyError.
+                continue
+            bindings.append(
                 ModelBinding(
-                    provider=b["provider"],
-                    upstream=b["upstream"],
+                    provider=provider,
+                    upstream=upstream,
                     priority=b.get("priority", 1),
                 )
-                for b in entry["bindings"]
-            ]
-        else:
-            bindings = [
-                ModelBinding(
-                    provider=entry["provider"],
-                    upstream=entry["upstream"],
-                    priority=entry.get("priority", 1),
-                )
-            ]
+            )
+        if not bindings:
+            continue  # no usable bindings -> drop this model
         models.append(
             LogicalModel(name=name, bindings=bindings, routing_strategy=strategy)
         )

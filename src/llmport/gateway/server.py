@@ -125,6 +125,22 @@ async def _tracked_stream(generator, state):
         state.request_count += 1
 
 
+async def _read_json_body(request: Request) -> dict | None:
+    """Read and return the request JSON body, or None if absent/invalid.
+
+    Returns None for unparseable bodies AND for valid JSON that is not a dict
+    (e.g. ``[1,2,3]`` or ``"foo"``), so callers return a 400 instead of an
+    unhandled 500 from ``body.get("model")`` (matching ``openai_catchall``).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    return body
+
+
 # ============================================================================
 # OpenAI protocol endpoints
 # ============================================================================
@@ -134,7 +150,12 @@ async def openai_chat(request: Request) -> Response:
     """POST /openai/v1/chat/completions (and SDK alias ``/v1/chat/completions``)."""
     state = get_state()
     router = state.get_router()
-    body = await request.json()
+    body = await _read_json_body(request)
+    if body is None:
+        return JSONResponse(
+            {"error": "Request body must be JSON with a 'model' field"},
+            status_code=400,
+        )
     requested = body.get("model")
     try:
         provider, model_name = router.resolve(requested)
@@ -241,9 +262,8 @@ async def openai_catchall(request: Request) -> Response:
 
     # Catchall forwards arbitrary OpenAI endpoints (e.g. /v1/embeddings).
     # The model must be present in the JSON body so we can route it.
-    try:
-        body = await request.json()
-    except Exception:
+    body = await _read_json_body(request)
+    if body is None:
         return JSONResponse(
             {"error": "Request body must be JSON with a 'model' field"},
             status_code=400,
@@ -280,7 +300,12 @@ async def anthropic_messages(request: Request) -> Response:
     """POST /anthropic/v1/messages (and SDK alias ``/v1/messages``)."""
     state = get_state()
     router = state.get_router()
-    body = await request.json()
+    body = await _read_json_body(request)
+    if body is None:
+        return JSONResponse(
+            {"error": "Request body must be JSON with a 'model' field"},
+            status_code=400,
+        )
     requested = body.get("model")
     try:
         provider, model_name = router.resolve(requested)

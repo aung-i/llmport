@@ -94,6 +94,25 @@ def test_parse_skips_entries_without_name():
     assert models[0].name == "ok"
 
 
+def test_parse_skips_malformed_bindings_instead_of_crashing():
+    """A binding missing provider/upstream (hand-edit typo) is skipped, and a
+    model left with no usable bindings is dropped -- no KeyError."""
+    # all bindings malformed -> model dropped entirely
+    assert parse_models_config([
+        {"name": "bad", "bindings": [{"provider": "p"}, {"upstream": "u"}]},
+    ]) == []
+    # one good + one bad -> only the good binding survives
+    models = parse_models_config([{
+        "name": "mixed",
+        "bindings": [
+            {"provider": "p1", "upstream": "u1"},
+            {"provider": "p2"},  # missing upstream -> skipped
+        ],
+    }])
+    assert len(models) == 1
+    assert [(b.provider, b.upstream) for b in models[0].bindings] == [("p1", "u1")]
+
+
 def test_parse_accepts_legacy_id_field_as_name():
     models = parse_models_config([
         {"id": "legacy", "provider": "p", "upstream": "u"},

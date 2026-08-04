@@ -50,11 +50,14 @@ class ProviderConfig:
             for k in ("status", "latency_ms", "last_check"):
                 if k in raw_health:
                     setattr(health, k, raw_health[k])
+        # Use .get() so a hand-edited config missing a field degrades to an
+        # empty/default value instead of raising KeyError and crashing startup.
+        pid = d.get("id") or ""
         return cls(
-            id=d["id"],
-            name=d.get("name", d["id"]),
-            protocol=d["protocol"],
-            base_url=d["base_url"],
+            id=pid,
+            name=d.get("name") or pid,
+            protocol=d.get("protocol") or "openai",
+            base_url=d.get("base_url") or "",
             api_key=d.get("api_key", ""),
             health=health,
         )

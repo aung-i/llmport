@@ -1,7 +1,19 @@
-"""CLI entry point for llmport."""
+"""CLI entry point for llmport.
 
-import argparse
+The command surface is built with Typer: a top-level app with the lifecycle
+commands (setup/start/stop/restart/status) and three nested sub-apps
+(provider/model/config). The Typer command wrappers are thin -- all real work
+lives in the ``_cmd_*`` / ``_provider_*`` / ``_model_*`` / ``_config_*``
+functions below, which take a :class:`DaemonManager` (and explicit params) so
+they stay callable from tests without going through argv parsing.
+"""
+
 import getpass
+import os
+import subprocess
+from typing import Literal
+
+import typer
 
 from llmport.daemon import DaemonManager, run_daemon
 
@@ -14,100 +26,163 @@ _DEFAULT_CFG = {
     "models": [],
 }
 
+# ============================================================================
+# Typer app & command wiring
+# ============================================================================
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Terminal LLM API Gateway - a local multi-provider routing proxy.",
+)
+provider_app = typer.Typer(no_args_is_help=True, help="管理供应商（API key 加密存储）")
+model_app = typer.Typer(no_args_is_help=True, help="管理模型映射（公开名 -> 供应商模型）")
+config_app = typer.Typer(no_args_is_help=True, help="配置文件管理（直接编辑 config.yaml）")
+
+app.add_typer(provider_app, name="provider")
+app.add_typer(model_app, name="model")
+app.add_typer(config_app, name="config")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"llmport {__version__}")
+        raise typer.Exit()
+
+
+def _daemon_callback(value: bool) -> None:
+    # Eager so it fires during parsing, before ``no_args_is_help`` can short-
+    # circuit a bare ``llmport --daemon`` (no subcommand) to the help screen.
+    if value:
+        run_daemon()
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    daemon: bool = typer.Option(
+        False, "--daemon", hidden=True,
+        callback=_daemon_callback, is_eager=True),
+    version: bool = typer.Option(
+        None, "--version", "-V",
+        callback=_version_callback, is_eager=True,
+        help="Show version and exit",
+    ),
+) -> None:
+    """Terminal LLM API Gateway - a local multi-provider routing proxy."""
+    # tui 入口暂时移除（后端 app.py/ui/* 保留）；恢复时加 @app.command("tui")
+    # 调 from llmport.app import LlmPortApp; LlmPortApp().run()。
+    # --daemon / --version are handled by their eager option callbacks above.
+
+
+# --- lifecycle commands ----------------------------------------------------
+
+
+@app.command("setup")
+def _cli_setup() -> None:
+    _cmd_setup(DaemonManager())
+
+
+@app.command("start")
+def _cli_start() -> None:
+    _cmd_start(DaemonManager())
+
+
+@app.command("stop")
+def _cli_stop() -> None:
+    _cmd_stop(DaemonManager())
+
+
+@app.command("restart")
+def _cli_restart() -> None:
+    _cmd_restart(DaemonManager())
+
+
+@app.command("status")
+def _cli_status() -> None:
+    _cmd_status(DaemonManager())
+
+
+# --- provider commands -----------------------------------------------------
+
+
+@provider_app.command("add")
+def _cli_provider_add(
+    id: str = typer.Option(..., "--id", help="供应商 ID，如 anthropic"),
+    name: str | None = typer.Option(None, "--name", help="显示名称（默认同 id）"),
+    protocol: Literal["openai", "anthropic"] = typer.Option(
+        "openai", "--protocol", help="openai | anthropic"),
+    base_url: str | None = typer.Option(None, "--base-url", help="留空则按 protocol 取默认"),
+    api_key: str | None = typer.Option(
+        None, "--api-key",
+        help="API key；不传时：新增供应商则交互输入（不回显），更新供应商则保留原 key"),
+) -> None:
+    _provider_add(DaemonManager(), id=id, name=name, protocol=protocol,
+                  base_url=base_url, api_key=api_key)
+
+
+@provider_app.command("list")
+def _cli_provider_list() -> None:
+    _provider_list(DaemonManager())
+
+
+@provider_app.command("remove")
+def _cli_provider_remove(id: str = typer.Argument(..., help="供应商 ID")) -> None:
+    _provider_remove(DaemonManager(), id)
+
+
+@provider_app.command("test")
+def _cli_provider_test(id: str = typer.Argument(..., help="供应商 ID")) -> None:
+    _provider_test(DaemonManager(), id)
+
+
+# --- model commands --------------------------------------------------------
+
+
+@model_app.command("add")
+def _cli_model_add(
+    name: str = typer.Option(..., "--name", help="公开名（客户端请求时填的 model）"),
+    provider: str = typer.Option(..., "--provider", help="供应商 ID"),
+    upstream: str | None = typer.Option(None, "--upstream", help="供应商的真实模型名（默认同 name）"),
+) -> None:
+    _model_add(DaemonManager(), name=name, provider=provider, upstream=upstream)
+
+
+@model_app.command("list")
+def _cli_model_list() -> None:
+    _model_list(DaemonManager())
+
+
+@model_app.command("remove")
+def _cli_model_remove(name: str = typer.Argument(..., help="模型公开名")) -> None:
+    _model_remove(DaemonManager(), name)
+
+
+# --- config commands -------------------------------------------------------
+
+
+@config_app.command("init")
+def _cli_config_init() -> None:
+    _config_init(DaemonManager())
+
+
+@config_app.command("path")
+def _cli_config_path() -> None:
+    print(str(DaemonManager().store.config_path))
+
+
+@config_app.command("show")
+def _cli_config_show() -> None:
+    _config_show(DaemonManager())
+
+
+@config_app.command("edit")
+def _cli_config_edit() -> None:
+    _config_edit(DaemonManager())
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="llmport",
-        description="Terminal LLM API Gateway - a local multi-provider routing proxy.",
-    )
-    parser.add_argument(
-        "--daemon",
-        action="store_true",
-        help=argparse.SUPPRESS,  # internal: run as the gateway daemon
-    )
-    parser.add_argument(
-        "--version", "-V",
-        action="version",
-        version=f"%(prog)s {__version__}",
-        help="Show version and exit",
-    )
-    sub = parser.add_subparsers(dest="action", metavar="<command>")
-
-    sub.add_parser("setup", help="交互式配置供应商和模型")
-    sub.add_parser("start", help="启动网关（需先配置供应商）")
-    sub.add_parser("stop", help="停止网关")
-    sub.add_parser("restart", help="重启网关")
-    sub.add_parser("status", help="查看网关状态")
-    sub.add_parser("tui", help="打开 TUI")
-
-    _add_provider_parser(sub)
-    _add_model_parser(sub)
-
-    args = parser.parse_args()
-
-    if args.daemon:
-        run_daemon()
-        return
-
-    if args.action is None:
-        parser.print_help()
-        return
-
-    if args.action == "tui":
-        from llmport.app import LlmPortApp
-        LlmPortApp().run()
-        return
-
-    dm = DaemonManager()
-
-    if args.action == "setup":
-        _cmd_setup(dm)
-    elif args.action == "start":
-        _cmd_start(dm)
-    elif args.action == "stop":
-        _cmd_stop(dm)
-    elif args.action == "restart":
-        _cmd_restart(dm)
-    elif args.action == "status":
-        _cmd_status(dm)
-    elif args.action == "provider":
-        _cmd_provider(dm, args)
-    elif args.action == "model":
-        _cmd_model(dm, args)
-
-
-# ============================================================================
-# provider / model subcommand parsers
-# ============================================================================
-
-
-def _add_provider_parser(sub) -> None:
-    p = sub.add_parser("provider", help="管理供应商（API key 加密存储）")
-    ps = p.add_subparsers(dest="provider_action", metavar="<subcommand>")
-    a = ps.add_parser("add", help="添加/更新供应商")
-    a.add_argument("--id", required=True, help="供应商 ID，如 anthropic")
-    a.add_argument("--name", default=None, help="显示名称（默认同 id）")
-    a.add_argument("--protocol", choices=["openai", "anthropic"], default="openai")
-    a.add_argument("--base-url", default=None, help="留空则按 protocol 取默认")
-    a.add_argument(
-        "--api-key", default=None,
-        help="API key；不传时：新增供应商则交互输入（不回显），更新供应商则保留原 key",
-    )
-    ps.add_parser("list", help="列出已配置的供应商")
-    r = ps.add_parser("remove", help="删除供应商")
-    r.add_argument("id", help="供应商 ID")
-
-
-def _add_model_parser(sub) -> None:
-    p = sub.add_parser("model", help="管理模型映射（公开名 -> 供应商模型）")
-    ms = p.add_subparsers(dest="model_action", metavar="<subcommand>")
-    a = ms.add_parser("add", help="添加/更新模型")
-    a.add_argument("--name", required=True, help="公开名（客户端请求时填的 model）")
-    a.add_argument("--provider", required=True, help="供应商 ID")
-    a.add_argument("--upstream", default=None, help="供应商的真实模型名（默认同 name）")
-    ms.add_parser("list", help="列出已配置的模型")
-    r = ms.add_parser("remove", help="删除模型")
-    r.add_argument("name", help="模型公开名")
+    app()
 
 
 # ============================================================================
@@ -185,7 +260,9 @@ def _prompt_provider() -> dict | None:
     protocol = (_input("协议 openai/anthropic [openai]: ") or "openai").lower()
     if protocol not in ("openai", "anthropic"):
         protocol = "openai"
-    default_url = ("https://api.openai.com/v1" if protocol == "openai"
+    # base_url is the host root; the /v1 prefix lives in the request path
+    # constants (e.g. /v1/chat/completions). Including /v1 here would double it.
+    default_url = ("https://api.openai.com" if protocol == "openai"
                    else "https://api.anthropic.com")
     base_url = _input(f"base_url [{default_url}]: ") or default_url
     api_key = _input("API key (留空则不设): ")
@@ -227,25 +304,15 @@ def _ask_yes_no(prompt: str, default: bool = False) -> bool:
 # ============================================================================
 
 
-def _cmd_provider(dm: DaemonManager, args) -> None:
-    if args.provider_action == "add":
-        _provider_add(dm, args)
-    elif args.provider_action == "list":
-        _provider_list(dm)
-    elif args.provider_action == "remove":
-        _provider_remove(dm, args.id)
-    else:
-        print("用法: llmport provider {add|list|remove}")
-
-
-def _provider_add(dm: DaemonManager, args) -> None:
+def _provider_add(
+    dm: DaemonManager, *, id: str, name: str | None, protocol: str,
+    base_url: str | None, api_key: str | None,
+) -> None:
     """Add or update a provider. The API key is encrypted into secrets.enc.
 
     Updating an existing provider without ``--api-key`` preserves the
     existing key; only a brand-new provider prompts for one.
     """
-    from llmport.gateway.ip_utils import validate_public_url
-
     store = dm.store
     _ensure_store_init(store)
 
@@ -253,28 +320,29 @@ def _provider_add(dm: DaemonManager, args) -> None:
     providers = cfg.get("providers", [])
     secrets = store.load_secrets()
 
-    pid = args.id
+    pid = id
     existing = next((p for p in providers if p["id"] == pid), None)
 
-    base_url = args.base_url
     if not base_url:
-        base_url = ("https://api.openai.com/v1" if args.protocol == "openai"
+        # Host root only; /v1 is added by the path constants on forward.
+        base_url = ("https://api.openai.com" if protocol == "openai"
                     else "https://api.anthropic.com")
-    if not validate_public_url(base_url):
-        print(f"不允许使用内网/本地地址: {base_url}")
-        return
 
     # Key resolution: explicit flag > prompt (new provider) > keep existing.
-    api_key = args.api_key
+    raw_api_key = api_key  # None when --api-key was not passed
     if api_key is None:
         if existing is None:
-            api_key = getpass.getpass("API key (输入不回显,留空跳过): ").strip()
+            try:
+                api_key = getpass.getpass("API key (输入不回显,留空跳过): ").strip()
+            except (EOFError, OSError):
+                print("无法交互读取 API key（非交互式环境）。请用 --api-key 传入。")
+                return
         else:
             api_key = secrets.get(pid, "")  # keep existing key on update
 
-    name = args.name or pid
+    name = name or pid
     providers = [p for p in providers if p["id"] != pid] + [{
-        "id": pid, "name": name, "protocol": args.protocol, "base_url": base_url}]
+        "id": pid, "name": name, "protocol": protocol, "base_url": base_url}]
     if api_key:
         secrets[pid] = api_key
 
@@ -285,7 +353,7 @@ def _provider_add(dm: DaemonManager, args) -> None:
     if existing is None:
         print(f"已添加供应商 {pid} (API key {'已加密存储' if api_key else '未设置'})")
     else:
-        if args.api_key:
+        if raw_api_key:
             print(f"已更新供应商 {pid} (API key 已更新)")
         else:
             print(f"已更新供应商 {pid} (API key 保留原值)")
@@ -320,40 +388,101 @@ def _provider_remove(dm: DaemonManager, pid: str) -> None:
     print(f"已删除供应商 {pid}（及其 key）。")
 
 
+def _provider_test(dm: DaemonManager, pid: str) -> None:
+    """Test a configured provider's connection directly from disk.
+
+    No daemon required: reads config + secrets, then calls the same handler
+    functions the control API uses. For OpenAI it lists upstream models
+    (handy for picking the ``upstream`` name in a model mapping); for
+    Anthropic it sends a minimal 1-token request.
+    """
+    import asyncio
+
+    store = dm.store
+    cfg = _safe_load_config(store)
+    if not cfg:
+        print("无配置文件。运行 `llmport config init` 或 `llmport provider add`。")
+        return
+    providers = cfg.get("providers", [])
+    entry = next((p for p in providers if p.get("id") == pid), None)
+    if not entry:
+        ids = ", ".join(p.get("id", "") for p in providers) or "（无）"
+        print(f"未找到供应商 {pid}。已配置: {ids}")
+        return
+    secrets = store.load_secrets()
+    api_key = secrets.get(pid, "")
+    if not api_key:
+        print(f"供应商 {pid} 未设置 API key。")
+        print(f"运行 `llmport provider add --id {pid} --api-key <key>` 补上。")
+        return
+
+    from llmport.models.provider import ProviderConfig
+    provider = ProviderConfig(
+        id=pid,
+        name=entry.get("name", pid),
+        protocol=entry.get("protocol", "openai"),
+        base_url=entry.get("base_url", ""),
+        api_key=api_key,
+    )
+    print(f"测试 {pid} ({provider.protocol}, {provider.base_url}) ...")
+    result = asyncio.run(_provider_test_async(provider))
+    if result["ok"]:
+        print(f"✓ 连通 ({result['latency_ms']:.0f}ms)")
+        models = result.get("models")
+        if models:
+            ids = [m.get("id") for m in models
+                   if isinstance(m, dict) and m.get("id")]
+            print(f"  可用模型 ({len(ids)}):")
+            for mid in ids[:20]:
+                print(f"    {mid}")
+            if len(ids) > 20:
+                print(f"    ... 还有 {len(ids) - 20} 个")
+    else:
+        err = result["error"] or "连接失败（上游无响应或网络错误）"
+        print(f"✗ 失败: {err}")
+        raise SystemExit(1)
+
+
+async def _provider_test_async(provider) -> dict:
+    """Run the protocol-appropriate connectivity test, return a result dict."""
+    import time
+    from llmport.gateway import openai_handler, anthropic_handler
+
+    if provider.protocol == "openai":
+        t0 = time.monotonic()
+        models, error = await openai_handler.list_models(provider)
+        latency = (time.monotonic() - t0) * 1000
+        return {"ok": models is not None, "latency_ms": latency,
+                "error": error, "models": models}
+    ok, latency, error = await anthropic_handler.test_connection(provider)
+    return {"ok": ok, "latency_ms": latency, "error": error, "models": None}
+
+
 # ============================================================================
 # model add / list / remove
 # ============================================================================
 
 
-def _cmd_model(dm: DaemonManager, args) -> None:
-    if args.model_action == "add":
-        _model_add(dm, args)
-    elif args.model_action == "list":
-        _model_list(dm)
-    elif args.model_action == "remove":
-        _model_remove(dm, args.name)
-    else:
-        print("用法: llmport model {add|list|remove}")
-
-
-def _model_add(dm: DaemonManager, args) -> None:
+def _model_add(
+    dm: DaemonManager, *, name: str, provider: str, upstream: str | None,
+) -> None:
     store = dm.store
     _ensure_store_init(store)
 
     cfg = _safe_load_config(store) or dict(_DEFAULT_CFG)
     provider_ids = [p["id"] for p in cfg.get("providers", [])]
-    if args.provider not in provider_ids:
-        print(f"未知供应商 {args.provider}。先运行: llmport provider add --id {args.provider}")
+    if provider not in provider_ids:
+        print(f"未知供应商 {provider}。先运行: llmport provider add --id {provider}")
         return
 
-    upstream = args.upstream or args.name
+    upstream = upstream or name
     models = cfg.get("models", [])
-    existed = any(m.get("name") == args.name for m in models)
-    models = [m for m in models if m.get("name") != args.name]
-    models.append({"name": args.name, "provider": args.provider, "upstream": upstream})
+    existed = any(m.get("name") == name for m in models)
+    models = [m for m in models if m.get("name") != name]
+    models.append({"name": name, "provider": provider, "upstream": upstream})
     cfg["models"] = models
     store.save_config(cfg)
-    print(f"{'已更新' if existed else '已添加'}模型 {args.name} -> {args.provider}/{upstream}")
+    print(f"{'已更新' if existed else '已添加'}模型 {name} -> {provider}/{upstream}")
 
 
 def _model_list(dm: DaemonManager) -> None:
@@ -388,6 +517,64 @@ def _model_remove(dm: DaemonManager, name: str) -> None:
 
 
 # ============================================================================
+# config init / path / show / edit
+# ============================================================================
+
+
+def _config_init(dm: DaemonManager) -> None:
+    """Write the commented config template (refuses to clobber an existing one)."""
+    store = dm.store
+    if store.config_path.exists():
+        print(f"配置文件已存在: {store.config_path}")
+        print("如需重新生成模板,请先备份并删除该文件,再运行 `llmport config init`。")
+        return
+    store.init_first_run(config_template=True)
+    print(f"已生成配置模板: {store.config_path}")
+    print("编辑该文件填入供应商和模型,然后运行 `llmport start`。")
+    print("API key 不写进 config.yaml,用 `llmport provider add` 单独加密存储。")
+
+
+def _config_show(dm: DaemonManager) -> None:
+    """Print config.yaml contents (no secrets live there) + key-status notes."""
+    store = dm.store
+    if not store.config_path.exists():
+        print("尚无配置文件。运行 `llmport config init` 生成模板。")
+        return
+    text = store.config_path.read_text(encoding="utf-8")
+    print(text, end="" if text.endswith("\n") else "\n")
+
+    # Best-effort: annotate which providers have a key in the vault. The config
+    # file itself never holds keys, so this is the only way to see key status.
+    try:
+        cfg = store.load_config()
+    except Exception:
+        return
+    providers = cfg.get("providers", []) if isinstance(cfg, dict) else []
+    if not providers:
+        return
+    try:
+        secrets = store.load_secrets()
+    except Exception:
+        secrets = {}
+    print()
+    print("# API key 状态（key 存在 secrets.enc,不在上面的文件里）:")
+    for p in providers:
+        pid = p.get("id", "")
+        status = "已设置" if secrets.get(pid) else "未设置"
+        print(f"#   {pid}: {status}")
+
+
+def _config_edit(dm: DaemonManager) -> None:
+    """Open config.yaml in $EDITOR (default vi)."""
+    store = dm.store
+    if not store.config_path.exists():
+        print("尚无配置文件。运行 `llmport config init` 生成模板。")
+        return
+    editor = os.environ.get("EDITOR") or "vi"
+    subprocess.call([editor, str(store.config_path)])
+
+
+# ============================================================================
 # daemon control
 # ============================================================================
 
@@ -398,6 +585,8 @@ def _cmd_start(dm: DaemonManager) -> None:
     if not cfg or not cfg.get("providers"):
         print("尚未配置供应商。请先运行: llmport setup")
         return
+    for w in _validate_config(cfg):
+        print(f"警告: {w}")
     if dm.is_running():
         print(f"Gateway already running on {_url(dm)}")
         return
@@ -421,13 +610,17 @@ def _cmd_stop(dm: DaemonManager) -> None:
 
 def _cmd_restart(dm: DaemonManager) -> None:
     if dm.is_running():
-        dm.restart()
-        print(f"Gateway restarted on {_url(dm)}")
+        if dm.restart():
+            print(f"Gateway restarted on {_url(dm)}")
+        else:
+            print("Gateway failed to restart. Check that the configured port "
+                  "is free and config.yaml is valid.")
     else:
         if dm.start():
             print(f"Gateway started on {_url(dm)}")
         else:
-            print("Gateway failed to start.")
+            print("Gateway failed to start. Check that the configured port "
+                  "is free and config.yaml is valid.")
 
 
 def _cmd_status(dm: DaemonManager) -> None:
@@ -472,17 +665,12 @@ def _cmd_status(dm: DaemonManager) -> None:
 
 
 def _ensure_store_init(store) -> None:
-    """Make sure the config dir, key, template config, and vault exist."""
-    from llmport.config.crypto import generate_key
+    """Ensure the config dir, key, template config, and vault exist.
 
-    store.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not store.key_path.exists():
-        store.key_path.write_bytes(generate_key())
-        store.key_path.chmod(0o600)
-    if not store.config_path.exists():
-        store.write_config_template()
-    if not store.secrets_path.exists():
-        store.save_secrets({})
+    Delegates to ``store.init_first_run`` (single init path, kept in sync)
+    with the commented template so ``setup`` users get a reference config.
+    """
+    store.init_first_run(config_template=True)
 
 
 def _url(dm: DaemonManager) -> str:
@@ -493,11 +681,53 @@ def _url(dm: DaemonManager) -> str:
 
 
 def _safe_load_config(store) -> dict | None:
-    """Load config, returning None if it doesn't exist or can't be read."""
+    """Load config. Return None only if it doesn't exist yet.
+
+    A corrupt/unreadable config is NOT silently replaced with the default --
+    that would destroy the user's existing providers/models on the next
+    ``provider add`` / ``model add`` / ``setup``. Abort with a message instead
+    so the user can fix or back up the file.
+    """
     try:
         return store.load_config()
-    except Exception:
+    except FileNotFoundError:
         return None
+    except Exception as e:
+        # Corrupt YAML, or valid-YAML-but-not-a-dict (load_config raises
+        # ValueError for the latter). Refuse rather than fall back to the
+        # empty default, which would overwrite the user's existing config.
+        print(f"配置文件 {store.config_path} 无法解析: {e}")
+        print("已中止,不会覆盖现有配置。请修复后重试,或备份后删除该文件重新配置。")
+        raise SystemExit(1)
+
+
+def _validate_config(cfg) -> list[str]:
+    """Return human-readable warnings about malformed config entries.
+
+    The parser (``parse_models_config`` / ``ProviderConfig.from_dict``)
+    tolerates missing fields by skipping/degrading instead of crashing, so a
+    hand-edit typo can silently drop a model or leave a provider inert. This
+    surfaces such cases at ``llmport start`` time -- in the user's terminal,
+    not the detached daemon's discarded stderr.
+    """
+    if not isinstance(cfg, dict):
+        return []
+    from llmport.models.model import parse_models_config
+
+    warnings: list[str] = []
+    for p in cfg.get("providers", []):
+        if not p.get("id"):
+            warnings.append("供应商条目缺少 id 字段，将被忽略")
+        elif not p.get("base_url"):
+            warnings.append(f"供应商 {p['id']} 缺少 base_url，无法转发")
+    parsed_names = {m.name for m in parse_models_config(cfg.get("models", []))}
+    for m in cfg.get("models", []):
+        name = m.get("name") or m.get("id")
+        if name and name not in parsed_names:
+            warnings.append(
+                f"模型 {name} 的 binding 缺字段（provider/upstream），将被忽略"
+            )
+    return warnings
 
 
 def _fmt_uptime(seconds: float) -> str:

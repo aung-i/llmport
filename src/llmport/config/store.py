@@ -37,7 +37,7 @@ _CONFIG_TEMPLATE = """\
 #   - id: openai
 #     name: OpenAI
 #     protocol: openai
-#     base_url: https://api.openai.com/v1
+#     base_url: https://api.openai.com   # 主机根,/v1 由网关自动补
 #
 # 模型 —— 客户端请求时填的公开名,映射到供应商的真实模型名。
 # 简写(单供应商):
@@ -73,6 +73,19 @@ def _normalize_gateway(data: dict) -> dict:
     return {"host": gw.get("host", "127.0.0.1"), "port": int(gw.get("port", 11434))}
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write bytes atomically: temp file in the same dir, then ``os.replace``.
+
+    A crash mid-write leaves the temp file, not a truncated ``path``, so the
+    existing config/secrets survive. ``os.replace`` is atomic on POSIX when
+    source and dest share a filesystem (they do: same dir). Text callers
+    encode to UTF-8 bytes first.
+    """
+    tmp = path.parent / (path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 class ConfigStore:
     """Persists readable config and an encrypted secrets vault."""
 
@@ -91,11 +104,14 @@ class ConfigStore:
     # First-run / migration
     # ------------------------------------------------------------------
 
-    def init_first_run(self) -> None:
+    def init_first_run(self, config_template: bool = False) -> None:
         """Create the config directory, key, default config, and empty vault.
 
         If a legacy ``config.enc`` blob is present, it is migrated to the
-        split format instead of creating a fresh config.
+        split format instead of creating a fresh config. When
+        *config_template* is True and a fresh config is created, write the
+        commented template (for ``llmport setup``) instead of the bare
+        default used by the daemon start path.
         """
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -108,12 +124,15 @@ class ConfigStore:
             self.key_path.chmod(0o600)
 
         if not self.config_path.exists():
-            self.save_config({
-                "version": 1,
-                "gateway": dict(DEFAULT_GATEWAY),
-                "providers": [],
-                "models": [],
-            })
+            if config_template:
+                self.write_config_template()
+            else:
+                self.save_config({
+                    "version": 1,
+                    "gateway": dict(DEFAULT_GATEWAY),
+                    "providers": [],
+                    "models": [],
+                })
 
         if not self.secrets_path.exists():
             self.save_secrets({})
@@ -203,9 +222,22 @@ class ConfigStore:
     # ------------------------------------------------------------------
 
     def load_config(self) -> dict:
-        """Load and return the readable config (no API keys)."""
+        """Load and return the readable config (no API keys).
+
+        Raises ``ValueError`` if the file is valid YAML but not a mapping
+        (e.g. a top-level list from a copy-paste mistake), so callers can
+        abort cleanly instead of crashing on ``.get()`` or overwriting the
+        user's data on the next write.
+        """
         with self.config_path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f)
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"config.yaml 顶层必须是字典，得到 {type(data).__name__}"
+            )
+        return data
 
     def save_config(self, data: dict) -> None:
         """Write the readable config. Must NOT contain API keys."""
@@ -213,7 +245,7 @@ class ConfigStore:
         plaintext = yaml.dump(
             data, default_flow_style=False, allow_unicode=True, sort_keys=False
         )
-        self.config_path.write_text(plaintext, encoding="utf-8")
+        _atomic_write_bytes(self.config_path, plaintext.encode("utf-8"))
         try:
             self.config_path.chmod(0o600)
         except (OSError, AttributeError):
@@ -226,7 +258,7 @@ class ConfigStore:
         fill in (or hand-edit). Not used by the daemon start path.
         """
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(_CONFIG_TEMPLATE, encoding="utf-8")
+        _atomic_write_bytes(self.config_path, _CONFIG_TEMPLATE.encode("utf-8"))
         try:
             self.config_path.chmod(0o600)
         except (OSError, AttributeError):
@@ -252,7 +284,7 @@ class ConfigStore:
         plaintext = yaml.dump(
             secrets, default_flow_style=False, allow_unicode=True, sort_keys=True
         )
-        self.secrets_path.write_bytes(encrypt(key, plaintext))
+        _atomic_write_bytes(self.secrets_path, encrypt(key, plaintext))
         try:
             self.secrets_path.chmod(0o600)
         except (OSError, AttributeError):

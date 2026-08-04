@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from llmport.config.crypto import encrypt, generate_key
@@ -25,6 +26,26 @@ def test_init_first_run_creates_key_config_and_secrets():
         assert data["gateway"]["port"] == 11434
         assert data["providers"] == []
         assert data["models"] == []
+
+
+def test_load_config_empty_file_returns_empty_dict():
+    """An empty config.yaml parses to {} (not None or a crash)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.dir.mkdir(parents=True, exist_ok=True)
+        store.config_path.write_text("")
+        assert store.load_config() == {}
+
+
+def test_load_config_rejects_non_dict_top_level():
+    """A valid-YAML but non-mapping config raises ValueError, not a silent
+    bad return that downstream callers would crash on."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.dir.mkdir(parents=True, exist_ok=True)
+        store.config_path.write_text("- id: anthropic\n  base_url: x\n")  # list
+        with pytest.raises(ValueError):
+            store.load_config()
 
 
 def test_save_and_load_preserves_providers_and_models():

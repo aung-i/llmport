@@ -154,30 +154,6 @@ class TestControlApiErrorPaths:
         return state
 
     # ------------------------------------------------------------------
-    # POST /api/providers - SSRF rejection
-    # ------------------------------------------------------------------
-
-    def test_post_providers_rejects_private_url(self):
-        """POST /api/providers with a private base_url must return 400."""
-        app = self._make_providers_app()
-        mock_state = self._mock_state()
-        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
-            client = TestClient(app)
-            resp = client.post("/api/providers", json={
-                "id": "test-p",
-                "name": "Test",
-                "protocol": "openai",
-                "base_url": "http://192.168.1.1",
-                "api_key": "sk-test",
-            })
-        assert resp.status_code == 400, (
-            f"Expected 400 for private URL, got {resp.status_code}"
-        )
-        data = resp.json()
-        assert data.get("ok") is False
-        assert "内网" in data.get("error", "")
-
-    # ------------------------------------------------------------------
     # DELETE /api/providers - missing id
     # ------------------------------------------------------------------
 
@@ -307,6 +283,42 @@ class TestControlApiErrorPaths:
         assert updated.api_key == "", (
             f"Expected empty api_key, got {updated.api_key!r}"
         )
+
+    def test_post_providers_sentinel_preserves_existing_key(self):
+        """api_key='***' with a matching base_url keeps the existing key."""
+        from llmport.models.provider import ProviderConfig
+        app = self._make_providers_app()
+        existing = ProviderConfig.from_dict({
+            "id": "p", "name": "P", "protocol": "openai",
+            "base_url": "https://api.example.com", "api_key": "sk-secret",
+        })
+        mock_state = self._mock_state(providers=[existing])
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            client = TestClient(app)
+            resp = client.post("/api/providers", json={
+                "id": "p", "name": "P", "protocol": "openai",
+                "base_url": "https://api.example.com", "api_key": "***",
+            })
+        assert resp.status_code == 200, resp.text
+        assert mock_state.providers[0].api_key == "sk-secret"
+
+    def test_post_providers_sentinel_rejects_base_url_mismatch(self):
+        """api_key='***' with a different base_url must return 400."""
+        from llmport.models.provider import ProviderConfig
+        app = self._make_providers_app()
+        existing = ProviderConfig.from_dict({
+            "id": "p", "name": "P", "protocol": "openai",
+            "base_url": "https://api.example.com", "api_key": "sk-secret",
+        })
+        mock_state = self._mock_state(providers=[existing])
+        with patch("llmport.gateway.control_api.get_state", return_value=mock_state):
+            client = TestClient(app)
+            resp = client.post("/api/providers", json={
+                "id": "p", "name": "P", "protocol": "openai",
+                "base_url": "https://api.other.com", "api_key": "***",
+            })
+        assert resp.status_code == 400, resp.text
+        assert "base_url mismatch" in resp.json().get("error", "")
 
     # ------------------------------------------------------------------
     # POST /api/providers/test - anthropic test_connection branch
