@@ -35,7 +35,7 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Terminal LLM API Gateway - a local multi-provider routing proxy.",
 )
-provider_app = typer.Typer(no_args_is_help=True, help="管理供应商（API key 加密存储）")
+provider_app = typer.Typer(no_args_is_help=True, help="管理供应商（API key 明文存储）")
 model_app = typer.Typer(no_args_is_help=True, help="管理模型映射（公开名 -> 供应商模型）")
 config_app = typer.Typer(no_args_is_help=True, help="配置文件管理（直接编辑 config.yaml）")
 
@@ -191,112 +191,26 @@ def main() -> None:
 
 
 def _cmd_setup(dm: DaemonManager) -> None:
-    """Interactive setup: create the config template and add providers/models."""
+    """Bootstrap the config directory, template config, and empty secrets file.
+
+    Setup does NOT prompt for providers/models -- that's what ``provider add``
+    and ``model add`` are for. Setup just lays down the files and points the
+    user at the next steps.
+    """
     store = dm.store
     _ensure_store_init(store)
 
-    cfg = _safe_load_config(store) or dict(_DEFAULT_CFG)
-    providers = cfg.get("providers", [])
-    models = cfg.get("models", [])
-    secrets = store.load_secrets()
-    added = False
-
     print("llmport 设置")
     print(f"配置目录: {store.dir}")
-    print("API key 只存到加密的 secrets.enc,不写进 config.yaml。")
+    print(f"  config.yaml   路由配置 (供应商/模型,不含 API key,可手编辑)")
+    print(f"  secrets.yaml  API key 明文存储 (0600,不写进 config.yaml)")
     print()
-
-    # Providers
-    print("== 供应商 ==")
-    while True:
-        p = _prompt_provider()
-        if p is None:
-            break
-        api_key = p.pop("_api_key")
-        providers = [x for x in providers if x["id"] != p["id"]] + [p]
-        if api_key:
-            secrets[p["id"]] = api_key
-        added = True
-        if not _ask_yes_no("再添加一个供应商?", default=False):
-            break
-
-    # Models
-    if providers:
-        print()
-        print("== 模型 ==")
-        provider_ids = [p["id"] for p in providers]
-        while True:
-            m = _prompt_model(provider_ids)
-            if m is None:
-                break
-            models = [x for x in models if x["name"] != m["name"]] + [m]
-            added = True
-            if not _ask_yes_no("再添加一个模型?", default=False):
-                break
-
-    if not added:
-        print()
-        print("未做修改。config.yaml 保留模板,可手编辑后运行 `llmport setup`,或用 "
-              "`llmport provider add` / `llmport model add`。")
-        return
-
-    cfg["providers"] = providers
-    cfg["models"] = models
-    store.save_config(cfg)
-    store.save_secrets(secrets)
-
+    print("下一步:")
+    print("  llmport provider add --id anthropic --protocol anthropic   # 加供应商")
+    print("  llmport model add --name claude-sonnet --provider anthropic  # 加模型映射")
+    print("  llmport start                                                # 启动网关")
     print()
-    print(f"已保存: {store.config_path}")
-    print(f"供应商 {len(providers)} 个,模型 {len(models)} 个。")
-    print("运行 `llmport start` 启动网关。")
-
-
-def _prompt_provider() -> dict | None:
-    """Prompt for one provider. Returns None if the user skips."""
-    pid = _input("供应商 ID (如 anthropic,留空跳过): ")
-    if not pid:
-        return None
-    name = _input(f"显示名称 [{pid}]: ") or pid
-    protocol = (_input("协议 openai/anthropic [openai]: ") or "openai").lower()
-    if protocol not in ("openai", "anthropic"):
-        protocol = "openai"
-    # base_url is the host root; the /v1 prefix lives in the request path
-    # constants (e.g. /v1/chat/completions). Including /v1 here would double it.
-    default_url = ("https://api.openai.com" if protocol == "openai"
-                   else "https://api.anthropic.com")
-    base_url = _input(f"base_url [{default_url}]: ") or default_url
-    api_key = _input("API key (留空则不设): ")
-    return {
-        "id": pid,
-        "name": name,
-        "protocol": protocol,
-        "base_url": base_url,
-        "_api_key": api_key,
-    }
-
-
-def _prompt_model(provider_ids: list[str]) -> dict | None:
-    """Prompt for one model mapping. Returns None if the user skips."""
-    name = _input("模型公开名 (客户端请求时填,如 claude-sonnet;留空跳过): ")
-    if not name:
-        return None
-    default_p = provider_ids[0]
-    p = _input(f"供应商 ({'/'.join(provider_ids)}) [{default_p}]: ") or default_p
-    upstream = _input(f"供应商的真实模型名 [{name}]: ") or name
-    return {"name": name, "provider": p, "upstream": upstream}
-
-
-def _input(prompt: str) -> str:
-    """Wrapper around input() so tests can monkeypatch it."""
-    return input(prompt).strip()
-
-
-def _ask_yes_no(prompt: str, default: bool = False) -> bool:
-    suffix = " [Y/n] " if default else " [y/N] "
-    raw = _input(prompt + suffix).lower()
-    if not raw:
-        return default
-    return raw in ("y", "yes")
+    print("提示: provider add 不传 --api-key 时交互输入(不回显)。")
 
 
 # ============================================================================
@@ -308,7 +222,7 @@ def _provider_add(
     dm: DaemonManager, *, id: str, name: str | None, protocol: str,
     base_url: str | None, api_key: str | None,
 ) -> None:
-    """Add or update a provider. The API key is encrypted into secrets.enc.
+    """Add or update a provider. The API key is stored in secrets.yaml (plaintext).
 
     Updating an existing provider without ``--api-key`` preserves the
     existing key; only a brand-new provider prompts for one.
@@ -362,7 +276,7 @@ def _provider_add(
     store.save_secrets(secrets)
 
     if existing is None:
-        print(f"已添加供应商 {pid} (API key {'已加密存储' if api_key else '未设置'})")
+        print(f"已添加供应商 {pid} (API key {'已存储' if api_key else '未设置'})")
     else:
         if raw_api_key:
             print(f"已更新供应商 {pid} (API key 已更新)")
@@ -546,7 +460,7 @@ def _config_init(dm: DaemonManager) -> None:
     store.init_first_run(config_template=True)
     print(f"已生成配置模板: {store.config_path}")
     print("编辑该文件填入供应商和模型,然后运行 `llmport start`。")
-    print("API key 不写进 config.yaml,用 `llmport provider add` 单独加密存储。")
+    print("API key 不写进 config.yaml,用 `llmport provider add` 单独明文存储。")
 
 
 def _config_show(dm: DaemonManager) -> None:
@@ -572,7 +486,7 @@ def _config_show(dm: DaemonManager) -> None:
     except Exception:
         secrets = {}
     print()
-    print("# API key 状态（key 存在 secrets.enc,不在上面的文件里）:")
+    print("# API key 状态（key 存在 secrets.yaml,不在上面的文件里）:")
     for p in providers:
         pid = p.get("id", "")
         status = "已设置" if secrets.get(pid) else "未设置"
@@ -595,10 +509,10 @@ def _config_edit(dm: DaemonManager) -> None:
 
 
 def _cmd_start(dm: DaemonManager) -> None:
-    # Require setup first: refuse to start with no providers configured.
+    # Refuse to start with no providers configured.
     cfg = _safe_load_config(dm.store)
     if not cfg or not cfg.get("providers"):
-        print("尚未配置供应商。请先运行: llmport setup")
+        print("尚未配置供应商。请先运行: llmport provider add --id <id>")
         return
     for w in _validate_config(cfg):
         print(f"警告: {w}")

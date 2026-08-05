@@ -2,10 +2,7 @@
 
 import tempfile
 
-import yaml
-
 from llmport.config.store import ConfigStore
-from llmport.config.crypto import generate_key, encrypt
 from llmport.gateway.server import create_app
 from llmport.gateway.state import migrate_gateway_config
 from starlette.testclient import TestClient
@@ -81,63 +78,24 @@ def test_protocol_mismatch_error():
         assert "Anthropic" in resp.json()["error"]
 
 
-def test_config_migration_old_format():
-    """Legacy config.enc is migrated to config.yaml + secrets.enc.
-
-    init_first_run() detects a legacy encrypted single-blob config and
-    splits it into readable config.yaml (no keys) + encrypted secrets.enc.
-    """
+def test_stray_legacy_config_enc_is_ignored():
+    """A leftover legacy encrypted config.enc blob cannot be migrated without
+    the old Fernet key (no longer kept). init_first_run ignores it and starts
+    fresh rather than crashing or attempting a read."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
 
-        # Simulate a legacy install: write a Fernet key + encrypted config.enc
-        # blob that contains providers with inline api_key and old-style
-        # model bindings (id/provider_id/model_name).
-        key = generate_key()
-        store.key_path.write_bytes(key)
-        store.key_path.chmod(0o600)
-        legacy = {
-            "gateway": {"host": "127.0.0.1", "port": 8080},
-            "providers": [
-                {
-                    "id": "openai",
-                    "name": "OpenAI",
-                    "protocol": "openai",
-                    "base_url": "https://api.openai.com",
-                    "api_key": "sk-legacy",
-                },
-            ],
-            "models": [
-                {
-                    "id": "gpt",
-                    "bindings": [
-                        {"provider_id": "openai", "model_name": "gpt-4"},
-                    ],
-                },
-            ],
-        }
-        store.legacy_path.write_bytes(encrypt(key, yaml.dump(legacy)))
+        # Plant a stray legacy blob (contents irrelevant; not a real token).
+        store.dir.mkdir(parents=True, exist_ok=True)
+        (store.dir / "config.enc").write_bytes(b"\x80\x8c not a fernet token")
 
-        # init_first_run sees the legacy blob + key and migrates.
+        # init_first_run must not choke on the stray blob.
         store.init_first_run()
 
-        # The legacy blob is gone; config.yaml + secrets.enc now exist.
         assert store.config_path.exists()
-        assert not store.legacy_path.exists()
-
-        config = store.load_config()
-        # Gateway migrated from old shape.
-        assert config["gateway"] == {"host": "127.0.0.1", "port": 8080}
-
-        # API keys live ONLY in the secrets vault, never in config.yaml.
-        assert all("api_key" not in p for p in config["providers"])
-        secrets = store.load_secrets()
-        assert secrets["openai"] == "sk-legacy"
-
-        # Models migrated to the new name/provider/upstream shape.
-        assert config["models"][0]["name"] == "gpt"
-        assert config["models"][0]["provider"] == "openai"
-        assert config["models"][0]["upstream"] == "gpt-4"
+        assert store.secrets_path.exists()
+        assert store.load_config()["providers"] == []
+        assert store.load_secrets() == {}
 
 
 def test_config_migration_empty_gateway():

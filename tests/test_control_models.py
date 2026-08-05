@@ -3,7 +3,7 @@
 The control API was narrowed to read-only status + lifecycle. Configuration
 CRUD / test / fetch endpoints were removed (they formed a programmatic SSRF
 entry via arbitrary ``base_url``); providers and models are now managed
-through the CLI, which writes ``config.yaml`` + ``secrets.enc`` and restarts
+through the CLI, which writes ``config.yaml`` + ``secrets.yaml`` and restarts
 the daemon.
 """
 

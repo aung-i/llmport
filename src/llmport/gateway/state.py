@@ -25,7 +25,7 @@ class GatewayState:
         """Reload config and secrets from disk.
 
         Providers are built from ``config.yaml`` with their API keys injected
-        from the encrypted ``secrets.enc`` vault. Models are parsed from the
+        from the plaintext ``secrets.yaml`` vault. Models are parsed from the
         ``models`` section.
         """
         data = self.store.load_config()

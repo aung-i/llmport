@@ -111,43 +111,33 @@ class TestStopCommand:
 
 
 class TestSetup:
-    """The `llmport setup` wizard."""
+    """The `llmport setup` command bootstraps files and points at next steps."""
 
     def test_setup_creates_config_and_secrets(self, tmp_path, monkeypatch):
-        """setup writes providers/models to config.yaml and keys to secrets.enc."""
+        """setup lays down config.yaml template + empty secrets.yaml, no prompts."""
         from llmport.config.store import ConfigStore
 
-        answers = iter([
-            "anthropic",        # provider id
-            "",                 # name (default -> anthropic)
-            "anthropic",        # protocol
-            "",                 # base_url (default)
-            "sk-setup-key",     # api key
-            "",                 # no more providers
-            "claude-sonnet",    # model name
-            "",                 # provider (default)
-            "claude-sonnet-4",  # upstream
-            "",                 # no more models
-        ])
-        monkeypatch.setattr("builtins.input", lambda _p: next(answers))
-
-        invoke(["llmport", "setup"], tmp_path, monkeypatch)
+        result = invoke(["llmport", "setup"], tmp_path, monkeypatch)
 
         store = ConfigStore(str(tmp_path / "llmport"))
-        cfg = store.load_config()
-        assert any(p["id"] == "anthropic" for p in cfg["providers"])
-        assert any(m["name"] == "claude-sonnet" for m in cfg["models"])
-        assert store.load_secrets() == {"anthropic": "sk-setup-key"}
-        # API key must not leak into the readable config.
-        assert "sk-setup-key" not in (tmp_path / "llmport" / "config.yaml").read_text()
+        # Template config + empty secrets vault created.
+        cfg_text = (tmp_path / "llmport" / "config.yaml").read_text()
+        assert "供应商" in cfg_text
+        assert "providers: []" in cfg_text
+        assert (tmp_path / "llmport" / "secrets.yaml").exists()
+        assert store.load_secrets() == {}
+        # No Fernet key file is created.
+        assert not (tmp_path / "llmport" / "key").exists()
+        # Output points the user at the dedicated commands, not an inline wizard.
+        assert "provider add" in result.stdout
+        assert "model add" in result.stdout
 
-    def test_setup_skip_leaves_template(self, tmp_path, monkeypatch):
-        """If the user skips all prompts, the template config.yaml remains."""
-        monkeypatch.setattr("builtins.input", lambda _p: "")
+    def test_setup_does_not_prompt(self, tmp_path, monkeypatch):
+        """setup must not read stdin -- it bootstraps and exits."""
+        calls = []
+        monkeypatch.setattr("builtins.input", lambda _p: calls.append(_p) or "")
         invoke(["llmport", "setup"], tmp_path, monkeypatch)
-        text = (tmp_path / "llmport" / "config.yaml").read_text()
-        assert "供应商" in text
-        assert "providers: []" in text
+        assert calls == []
 
 
 class TestStartGate:
@@ -156,7 +146,7 @@ class TestStartGate:
     def test_start_refuses_when_config_missing(self, tmp_path, monkeypatch):
         result = invoke(["llmport", "start"], tmp_path, monkeypatch)
         assert "尚未配置供应商" in result.stdout
-        assert "llmport setup" in result.stdout
+        assert "provider add" in result.stdout
 
     def test_start_refuses_with_empty_providers(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
@@ -216,8 +206,8 @@ class TestStartGate:
 class TestProviderModelCommands:
     """`llmport provider` and `llmport model` subcommands."""
 
-    def test_provider_add_encrypts_key(self, tmp_path, monkeypatch):
-        """provider add stores the key in secrets.enc, never in config.yaml."""
+    def test_provider_add_stores_key_separately(self, tmp_path, monkeypatch):
+        """provider add stores the key in secrets.yaml, never in config.yaml."""
         from llmport.config.store import ConfigStore
 
         invoke(["llmport", "provider", "add", "--id", "anthropic",

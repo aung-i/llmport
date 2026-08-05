@@ -16,7 +16,7 @@ class ProviderConfig:
     """Configuration for an LLM provider - connection info only.
 
     Model routing lives in the ``models`` config section, not here.
-    ``api_key`` is populated at runtime from the encrypted secrets vault
+    ``api_key`` is populated at runtime from the plaintext secrets vault
     and is never written to the readable ``config.yaml``.
     """
 
@@ -24,7 +24,7 @@ class ProviderConfig:
     name: str                      # display name, e.g. "Anthropic"
     protocol: str                  # "openai" | "anthropic"
     base_url: str                  # e.g. "https://api.anthropic.com"
-    api_key: str = ""              # plaintext in memory; encrypted in secrets.enc on disk
+    api_key: str = ""              # plaintext in memory; plaintext in secrets.yaml on disk
     health: ProviderHealth = field(default_factory=ProviderHealth)
 
     def to_dict(self, include_key: bool = True) -> dict:

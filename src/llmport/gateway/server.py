@@ -405,7 +405,7 @@ def create_app(store: ConfigStore) -> Starlette:
         Route("/v1/messages", anthropic_messages, methods=["POST"]),
         # Control API -- read-only status + lifecycle only.
         # Configuration (providers/models/gateway) is managed via the CLI,
-        # which writes config.yaml + secrets.enc and restarts the daemon; the
+        # which writes config.yaml + secrets.yaml and restarts the daemon; the
         # write/test endpoints were removed to close the programmatic SSRF
         # entry (arbitrary base_url injection/fetch at runtime).
         Route("/api/status", control_status, methods=["GET"]),

@@ -1,1 +1,1 @@
-"""Config encryption and persistence."""
+"""Config persistence."""

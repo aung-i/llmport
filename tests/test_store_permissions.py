@@ -1,9 +1,9 @@
 """Tests for config file and directory permissions after save (Issue 3).
 
 After save, the spec requires:
-- config.yaml  -> permissions 0o600 (owner read/write only)
-- secrets.enc  -> permissions 0o600 (owner read/write only)
-- directory    -> permissions 0o700 (owner read/write/execute only)
+- config.yaml   -> permissions 0o600 (owner read/write only)
+- secrets.yaml  -> permissions 0o600 (owner read/write only)
+- directory     -> permissions 0o700 (owner read/write/execute only)
 - Non-POSIX platforms where chmod is unsupported must not raise.
 """
 
@@ -33,8 +33,8 @@ def test_save_config_sets_config_yaml_to_600():
         )
 
 
-def test_save_secrets_sets_secrets_enc_to_600():
-    """After save_secrets(), secrets.enc has permissions 0o600."""
+def test_save_secrets_sets_secrets_yaml_to_600():
+    """After save_secrets(), secrets.yaml has permissions 0o600."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
@@ -42,7 +42,7 @@ def test_save_secrets_sets_secrets_enc_to_600():
 
         mode = stat.S_IMODE(os.stat(store.secrets_path).st_mode)
         assert mode == 0o600, (
-            f"Expected secrets.enc permissions 0o600, got {oct(mode)}"
+            f"Expected secrets.yaml permissions 0o600, got {oct(mode)}"
         )
 
 

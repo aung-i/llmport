@@ -4,20 +4,18 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import yaml
 
-from llmport.config.crypto import encrypt, generate_key
 from llmport.config.store import ConfigStore
 
 
-def test_init_first_run_creates_key_config_and_secrets():
+def test_init_first_run_creates_config_and_secrets():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        assert Path(tmp, "key").exists()
         assert Path(tmp, "config.yaml").exists()
-        assert Path(tmp, "secrets.enc").exists()
-        # The legacy single-blob config.enc must NOT be created.
+        assert Path(tmp, "secrets.yaml").exists()
+        # No Fernet key or legacy blob is created.
+        assert not Path(tmp, "key").exists()
         assert not Path(tmp, "config.enc").exists()
 
         data = store.load_config()
@@ -82,7 +80,7 @@ def test_save_and_load_preserves_providers_and_models():
         assert "api_key" not in loaded["providers"][0]
 
 
-def test_api_key_is_encrypted_at_rest():
+def test_api_key_stored_separately_from_config():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
@@ -93,7 +91,7 @@ def test_api_key_is_encrypted_at_rest():
             "protocol": "openai",
             "base_url": "https://api.example.com",
         })
-        # Provider config (no key) -> config.yaml; key -> encrypted vault.
+        # Provider config (no key) -> config.yaml; key -> plaintext secrets.yaml.
         store.save_config(config)
         store.save_secrets({"test": "sk-secret"})
 
@@ -102,77 +100,31 @@ def test_api_key_is_encrypted_at_rest():
         assert "sk-secret" not in config_text
         assert "api_key" not in config_text
 
-        # The key must NOT appear as plaintext in secrets.enc (it is encrypted).
-        secrets_raw = Path(tmp, "secrets.enc").read_bytes()
-        assert b"sk-secret" not in secrets_raw
+        # The key lives as plaintext in secrets.yaml (no encryption layer).
+        secrets_text = Path(tmp, "secrets.yaml").read_text(encoding="utf-8")
+        assert "sk-secret" in secrets_text
 
         # Round-trip: load_secrets returns the key.
         assert store.load_secrets() == {"test": "sk-secret"}
 
 
-def test_migrate_old_config_splits_legacy_blob():
+def test_stray_legacy_config_enc_is_ignored():
+    """A leftover legacy encrypted config.enc blob cannot be read without the
+    old Fernet key, which we no longer keep. init_first_run must ignore it
+    and create a fresh config rather than crash or migrate."""
     with tempfile.TemporaryDirectory() as tmp:
+        # Plant a stray legacy blob + orphan key (contents are irrelevant).
+        Path(tmp, "config.enc").write_bytes(b"\x80\x8c not a fernet token")
+        Path(tmp, "key").write_bytes(b"orphan")
+
         store = ConfigStore(tmp)
-
-        # Seed a legacy encrypted single-blob config.enc + key.
-        key = generate_key()
-        Path(tmp, "key").write_bytes(key)
-        legacy = {
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [{
-                "id": "oldprov",
-                "name": "OldProv",
-                "protocol": "openai",
-                "base_url": "https://api.example.com",
-                "api_key": "sk-old",
-                "models": [],
-            }],
-            "models": [{
-                "id": "my-model",
-                "bindings": [{
-                    "provider_id": "oldprov",
-                    "model_name": "gpt-4",
-                    "priority": 1,
-                }],
-            }],
-            "active_model": "my-model",
-        }
-        blob = encrypt(key, yaml.dump(legacy, default_flow_style=False))
-        Path(tmp, "config.enc").write_bytes(blob)
-
-        # init_first_run detects the legacy blob + key and migrates it.
         store.init_first_run()
 
-        # config.yaml exists, legacy config.enc is gone.
+        # Fresh config + secrets are created; the stray blob is left in place
+        # (not silently deleted) and never consulted.
         assert Path(tmp, "config.yaml").exists()
-        assert not Path(tmp, "config.enc").exists()
+        assert Path(tmp, "secrets.yaml").exists()
+        assert Path(tmp, "config.enc").exists()
 
-        config = store.load_config()
-        config_text = Path(tmp, "config.yaml").read_text(encoding="utf-8")
-
-        # No api_key / active_model / secret value in the readable config.
-        assert "api_key" not in config_text
-        assert "active_model" not in config_text
-        assert "sk-old" not in config_text
-        assert "api_key" not in config["providers"][0]
-        assert "active_model" not in config
-
-        # Provider migrated to {id, name, protocol, base_url} (no api_key).
-        assert config["providers"][0] == {
-            "id": "oldprov",
-            "name": "OldProv",
-            "protocol": "openai",
-            "base_url": "https://api.example.com",
-        }
-
-        # Model migrated to {name, provider, upstream} shape.
-        assert config["models"] == [{
-            "name": "my-model",
-            "provider": "oldprov",
-            "upstream": "gpt-4",
-        }]
-
-        # API key lives in the encrypted vault, not as plaintext.
-        assert store.load_secrets() == {"oldprov": "sk-old"}
-        assert b"sk-old" not in Path(tmp, "secrets.enc").read_bytes()
+        assert store.load_config()["providers"] == []
+        assert store.load_secrets() == {}
