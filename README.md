@@ -108,7 +108,11 @@ curl http://127.0.0.1:11434/v1/chat/completions \
 - `/openai/v1/*` -> OpenAI 协议
 - `/anthropic/v1/*` -> Anthropic 协议
 - `/v1/chat/completions`、`/v1/messages` -> SDK 别名
-- `/api/*` -> 控制 API
+- `/api/status` -> 只读运行态；`/api/daemon/{stop,restart}` -> 生命周期
+
+控制 API 只保留只读 status + 生命周期。供应商/模型/网关配置统一走 CLI（写 `config.yaml` + `secrets.enc`，守护进程在运行则自动重启生效），不再暴露运行时写接口——避免程序化注入任意 `base_url` 的 SSRF 面。
+
+`base_url` 校验：CLI 写盘时拦截云元数据/链路本地地址（`169.254.0.0/16`、`100.100.100.200`、`metadata.google.internal` 等）和指向网关自身的自环地址；放行 localhost/private，本地 Ollama / vLLM 照常可用。手编 config 里的不合规 base_url 会在 `llmport start` 时告警，并在运行时将该 provider 标记为 down 跳过。网关始终只绑回环地址（`0.0.0.0` 等非回环 host 一律强制为 `127.0.0.1`）。
 
 ## 技术栈
 

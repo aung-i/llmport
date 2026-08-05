@@ -38,41 +38,21 @@ class GatewayState:
         for p in self.providers:
             p.api_key = secrets.get(p.id, "")
 
-        self.models = parse_models_config(data.get("models", []))
+        # Defense-in-depth for hand-edited configs: a provider whose base_url
+        # is an SSRF risk (metadata / self-loop) is marked "down" so the router
+        # skips it. The CLI write path rejects these outright (see
+        # config.validation); this catches configs edited on disk directly.
+        from llmport.config.validation import validate_provider_base_url
+        for p in self.providers:
+            try:
+                validate_provider_base_url(
+                    p.base_url, self.gateway.get("host", "127.0.0.1"),
+                    int(self.gateway.get("port", 11434)),
+                )
+            except ValueError:
+                p.health.status = "down"
 
-    def save(self) -> None:
-        """Persist providers/models to config.yaml and keys to secrets.enc."""
-        config = {
-            "version": 1,
-            "gateway": self.gateway,
-            "providers": [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "protocol": p.protocol,
-                    "base_url": p.base_url,
-                }
-                for p in self.providers
-            ],
-            "models": [
-                {
-                    "name": m.name,
-                    "bindings": [
-                        {
-                            "provider": b.provider,
-                            "upstream": b.upstream,
-                            "priority": b.priority,
-                        }
-                        for b in m.bindings
-                    ],
-                    "routing_strategy": m.routing_strategy,
-                }
-                for m in self.models
-            ],
-        }
-        secrets = {p.id: p.api_key for p in self.providers if p.api_key}
-        self.store.save_config(config)
-        self.store.save_secrets(secrets)
+        self.models = parse_models_config(data.get("models", []))
 
     def get_router(self) -> Router:
         return Router(self.providers, self.models)

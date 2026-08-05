@@ -22,6 +22,17 @@ DEFAULT_PORT = 11434
 # How long start() waits for the gateway to answer /api/status before giving up.
 _START_TIMEOUT_SECONDS = 10.0
 
+# The gateway is loopback-only by design. No matter what config.yaml says, the
+# daemon never binds a non-loopback interface (the old control-API host check
+# was the only enforcement; it moved here so hand-edited configs can't expose
+# the gateway either).
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _loopback_host(host: str) -> str:
+    """Return *host* if it is loopback, else ``127.0.0.1``."""
+    return host if host in _LOOPBACK_HOSTS else "127.0.0.1"
+
 
 class DaemonManager:
     """Manages the gateway daemon process lifecycle."""
@@ -221,7 +232,7 @@ def run_daemon() -> None:
     store.init_first_run()  # handles first-run create + legacy migration
 
     gw = migrate_gateway_config(store.load_config())
-    host = gw["host"]
+    host = _loopback_host(gw["host"])
     port = gw["port"]
 
     # Write PID file: {pid, started_at, port}.

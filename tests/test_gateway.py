@@ -48,5 +48,4 @@ def test_create_app_returns_single_starlette_app():
         assert "/openai/v1/models" in paths
         assert "/anthropic/v1/messages" in paths
         assert "/api/status" in paths
-        assert "/api/models" in paths
-        assert "/api/providers" in paths
+        assert "/api/daemon/stop" in paths

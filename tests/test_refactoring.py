@@ -30,24 +30,12 @@ class TestIssue1ServerSplit:
         """Control API handlers must be importable from llmport.gateway.control_api."""
         from llmport.gateway.control_api import (
             control_status,
-            control_models,
-            control_models_delete,
-            control_providers,
-            control_test_provider,
-            control_fetch_models,
-            control_gateway_config,
             control_daemon_stop,
             control_daemon_restart,
         )
         # Verify each is a callable (async function)
         for handler in (
             control_status,
-            control_models,
-            control_models_delete,
-            control_providers,
-            control_test_provider,
-            control_fetch_models,
-            control_gateway_config,
             control_daemon_stop,
             control_daemon_restart,
         ):

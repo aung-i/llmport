@@ -328,6 +328,17 @@ def _provider_add(
         base_url = ("https://api.openai.com" if protocol == "openai"
                     else "https://api.anthropic.com")
 
+    # SSRF blocklist (metadata / self-loop). Reject before touching disk so a
+    # bad URL never lands in config.yaml. save_config re-checks as a safety net.
+    gw = cfg.get("gateway") or {}
+    try:
+        from llmport.config.validation import validate_provider_base_url
+        validate_provider_base_url(
+            base_url, gw.get("host", "127.0.0.1"), int(gw.get("port", 11434)))
+    except ValueError as e:
+        print(f"拒绝保存: {e}")
+        return
+
     # Key resolution: explicit flag > prompt (new provider) > keep existing.
     raw_api_key = api_key  # None when --api-key was not passed
     if api_key is None:
@@ -357,6 +368,7 @@ def _provider_add(
             print(f"已更新供应商 {pid} (API key 已更新)")
         else:
             print(f"已更新供应商 {pid} (API key 保留原值)")
+    _apply_if_running(dm)
 
 
 def _provider_list(dm: DaemonManager) -> None:
@@ -386,6 +398,7 @@ def _provider_remove(dm: DaemonManager, pid: str) -> None:
     store.save_config(cfg)
     store.save_secrets(secrets)
     print(f"已删除供应商 {pid}（及其 key）。")
+    _apply_if_running(dm)
 
 
 def _provider_test(dm: DaemonManager, pid: str) -> None:
@@ -483,6 +496,7 @@ def _model_add(
     cfg["models"] = models
     store.save_config(cfg)
     print(f"{'已更新' if existed else '已添加'}模型 {name} -> {provider}/{upstream}")
+    _apply_if_running(dm)
 
 
 def _model_list(dm: DaemonManager) -> None:
@@ -514,6 +528,7 @@ def _model_remove(dm: DaemonManager, name: str) -> None:
     cfg["models"] = new
     store.save_config(cfg)
     print(f"已删除模型 {name}。")
+    _apply_if_running(dm)
 
 
 # ============================================================================
@@ -673,6 +688,20 @@ def _ensure_store_init(store) -> None:
     store.init_first_run(config_template=True)
 
 
+def _apply_if_running(dm: DaemonManager) -> None:
+    """Restart the running daemon so config changes take effect.
+
+    The daemon reads config at startup, so CLI edits to config.yaml need a
+    restart to apply. Loopback gateway, ~1s downtime. No-op if not running.
+    """
+    if not dm.is_running():
+        return
+    if dm.restart():
+        print("已重启网关使配置生效")
+    else:
+        print("警告: 网关重启失败,新配置可能未生效。请手动 `llmport restart`。")
+
+
 def _url(dm: DaemonManager) -> str:
     port = dm.get_control_port()
     if port:
@@ -713,6 +742,11 @@ def _validate_config(cfg) -> list[str]:
     if not isinstance(cfg, dict):
         return []
     from llmport.models.model import parse_models_config
+    from llmport.config.validation import validate_provider_base_url
+
+    gw = cfg.get("gateway") or {}
+    gw_host = gw.get("host", "127.0.0.1")
+    gw_port = int(gw.get("port", 11434))
 
     warnings: list[str] = []
     for p in cfg.get("providers", []):
@@ -720,6 +754,13 @@ def _validate_config(cfg) -> list[str]:
             warnings.append("供应商条目缺少 id 字段，将被忽略")
         elif not p.get("base_url"):
             warnings.append(f"供应商 {p['id']} 缺少 base_url，无法转发")
+        else:
+            try:
+                validate_provider_base_url(
+                    p["base_url"], gw_host, gw_port)
+            except ValueError as e:
+                warnings.append(
+                    f"供应商 {p['id']} 的 base_url 被拒绝（运行时跳过）: {e}")
     parsed_names = {m.name for m in parse_models_config(cfg.get("models", []))}
     for m in cfg.get("models", []):
         name = m.get("name") or m.get("id")

@@ -51,36 +51,6 @@ def test_full_flow():
         assert len(models["data"]) >= 1
 
 
-def test_control_api_providers():
-    """Test provider CRUD via control API."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        # List providers (empty)
-        resp = client.get("/api/providers")
-        assert resp.status_code == 200
-        assert resp.json() == []
-
-        # Add provider
-        resp = client.post("/api/providers", json={
-            "id": "test",
-            "name": "Test",
-            "protocol": "openai",
-            "base_url": "https://api.example.com",
-            "api_key": "sk-test",
-        })
-        assert resp.status_code == 200
-
-        # List providers (should have 1)
-        resp = client.get("/api/providers")
-        assert resp.status_code == 200
-        assert len(resp.json()) == 1
-        assert resp.json()[0]["id"] == "test"
-
-
 def test_protocol_mismatch_error():
     """Test that requesting OpenAI endpoint with Anthropic provider returns error."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -109,55 +79,6 @@ def test_protocol_mismatch_error():
         })
         assert resp.status_code == 400
         assert "Anthropic" in resp.json()["error"]
-
-
-def test_gateway_config():
-    """Test gateway config GET and POST via control API."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        # GET default config
-        resp = client.get("/api/gateway/config")
-        assert resp.status_code == 200
-        cfg = resp.json()
-        assert cfg["host"] == "127.0.0.1"
-        assert cfg["port"] == 11434
-
-        # POST update config
-        resp = client.post("/api/gateway/config", json={
-            "host": "localhost",
-            "port": 9999,
-        })
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is True
-        assert resp.json()["gateway"]["host"] == "localhost"
-        assert resp.json()["gateway"]["port"] == 9999
-        assert resp.json().get("warning") is None  # loopback -> no warning
-
-        # GET confirm persistence
-        resp = client.get("/api/gateway/config")
-        assert resp.status_code == 200
-        assert resp.json()["host"] == "localhost"
-        assert resp.json()["port"] == 9999
-
-        # POST with empty host is rejected
-        resp = client.post("/api/gateway/config", json={
-            "host": "",
-            "port": 11434,
-        })
-        assert resp.status_code == 400
-        assert "无效的主机地址" in resp.json()["error"]
-
-        # POST with invalid port is rejected
-        resp = client.post("/api/gateway/config", json={
-            "host": "127.0.0.1",
-            "port": 80,
-        })
-        assert resp.status_code == 400
-        assert "端口号超出范围" in resp.json()["error"]
 
 
 def test_config_migration_old_format():
@@ -226,37 +147,6 @@ def test_config_migration_empty_gateway():
     assert result == {"host": "127.0.0.1", "port": 11434}
 
 
-def test_provider_delete():
-    """Provider can be deleted via DELETE /api/providers."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        # Add a provider
-        client.post("/api/providers", json={
-            "id": "test-provider",
-            "name": "Test",
-            "protocol": "openai",
-            "base_url": "https://api.example.com",
-            "api_key": "sk-test",
-        })
-
-        # Confirm it exists
-        resp = client.get("/api/providers")
-        assert len(resp.json()) == 1
-
-        # Delete via DELETE
-        resp = client.request("DELETE", "/api/providers", json={"id": "test-provider"})
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is True
-
-        # Verify list is empty
-        resp = client.get("/api/providers")
-        assert resp.json() == []
-
-
 def test_daemon_restart_endpoint():
     """POST /api/daemon/restart returns ok with action."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -269,80 +159,6 @@ def test_daemon_restart_endpoint():
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         assert resp.json()["action"] == "restart"
-
-
-def test_gateway_config_rejects_non_loopback():
-    """POST /api/gateway/config with non-loopback address is rejected (Issue 9)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        resp = client.post("/api/gateway/config", json={
-            "host": "0.0.0.0",
-            "port": 11434,
-        })
-        assert resp.status_code == 400
-        data = resp.json()
-        assert data["ok"] is False
-        assert "回环地址" in data["error"]
-
-
-def test_gateway_config_rejects_empty_host():
-    """POST /api/gateway/config with empty host returns 400."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        resp = client.post("/api/gateway/config", json={
-            "host": "",
-            "port": 11434,
-        })
-        assert resp.status_code == 400
-
-
-def test_control_test_provider_endpoint():
-    """POST /api/providers/test returns ok + latency_ms."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        resp = client.post("/api/providers/test", json={
-            "id": "test",
-            "name": "Test",
-            "protocol": "openai",
-            "base_url": "https://api.example.com",
-            "api_key": "sk-test",
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "ok" in data
-        assert "latency_ms" in data
-
-
-def test_control_fetch_models_endpoint():
-    """POST /api/providers/models returns models list."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        resp = client.post("/api/providers/models", json={
-            "id": "test",
-            "name": "Test",
-            "protocol": "openai",
-            "base_url": "https://api.example.com",
-            "api_key": "sk-test",
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "models" in data
 
 
 def test_parse_models_utility():

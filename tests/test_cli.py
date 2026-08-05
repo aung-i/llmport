@@ -8,7 +8,7 @@ in standalone mode, so direct ``main()`` calls would raise ``SystemExit``).
 import inspect
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from typer.testing import CliRunner
 
@@ -455,6 +455,73 @@ class TestProviderTestCommand:
         assert result.exit_code == 1
         assert "失败" in result.stdout
         assert "连接失败" in result.stdout  # generic fallback, not a bare colon
+
+
+# ===========================================================================
+# base_url SSRF validation + auto-reload
+# ===========================================================================
+
+
+class TestConfigValidationAndReload:
+    """base_url blocklist in the CLI write path + restart-on-config-change."""
+
+    def test_provider_add_rejects_metadata_base_url(self, tmp_path, monkeypatch):
+        from llmport.config.store import ConfigStore
+
+        result = invoke(["llmport", "provider", "add", "--id", "bad",
+                         "--protocol", "openai",
+                         "--base-url", "http://169.254.169.254",
+                         "--api-key", "sk"], tmp_path, monkeypatch)
+        assert "拒绝保存" in result.stdout
+        cfg = ConfigStore(str(tmp_path / "llmport")).load_config()
+        assert not any(p.get("id") == "bad" for p in cfg.get("providers", []))
+
+    def test_provider_add_rejects_self_loop_base_url(self, tmp_path, monkeypatch):
+        from llmport.config.store import ConfigStore
+
+        result = invoke(["llmport", "provider", "add", "--id", "loop",
+                         "--protocol", "openai",
+                         "--base-url", "http://127.0.0.1:11434",
+                         "--api-key", "sk"], tmp_path, monkeypatch)
+        assert "拒绝保存" in result.stdout
+        cfg = ConfigStore(str(tmp_path / "llmport")).load_config()
+        assert not any(p.get("id") == "loop" for p in cfg.get("providers", []))
+
+    def test_provider_add_allows_local_base_url(self, tmp_path, monkeypatch):
+        from llmport.config.store import ConfigStore
+
+        result = invoke(["llmport", "provider", "add", "--id", "ollama",
+                         "--protocol", "openai",
+                         "--base-url", "http://127.0.0.1:11435",
+                         "--api-key", "sk"], tmp_path, monkeypatch)
+        assert "已添加" in result.stdout
+        cfg = ConfigStore(str(tmp_path / "llmport")).load_config()
+        assert any(p.get("id") == "ollama" for p in cfg["providers"])
+
+    def test_validate_config_warns_on_bad_base_url(self):
+        from llmport.cli import _validate_config
+        cfg = {
+            "gateway": {"host": "127.0.0.1", "port": 11434},
+            "providers": [{"id": "bad", "base_url": "http://169.254.169.254"}],
+        }
+        warnings = _validate_config(cfg)
+        assert any("bad" in w and "拒绝" in w for w in warnings)
+
+    def test_apply_if_running_restarts(self, capsys):
+        from llmport.cli import _apply_if_running
+        dm = MagicMock()
+        dm.is_running.return_value = True
+        dm.restart.return_value = True
+        _apply_if_running(dm)
+        dm.restart.assert_called_once()
+        assert "已重启" in capsys.readouterr().out
+
+    def test_apply_if_running_noop_when_not_running(self):
+        from llmport.cli import _apply_if_running
+        dm = MagicMock()
+        dm.is_running.return_value = False
+        _apply_if_running(dm)
+        dm.restart.assert_not_called()
 
 
 # ===========================================================================

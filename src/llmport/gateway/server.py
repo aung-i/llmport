@@ -22,12 +22,6 @@ from llmport.gateway.state import GatewayState, init_state, get_state
 from llmport.gateway import openai_handler, anthropic_handler
 from llmport.gateway.control_api import (
     control_status,
-    control_models,
-    control_models_delete,
-    control_providers,
-    control_test_provider,
-    control_fetch_models,
-    control_gateway_config,
     control_daemon_stop,
     control_daemon_restart,
 )
@@ -409,14 +403,12 @@ def create_app(store: ConfigStore) -> Starlette:
         # SDK-compatible alias paths
         Route("/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/v1/messages", anthropic_messages, methods=["POST"]),
-        # Control API
+        # Control API -- read-only status + lifecycle only.
+        # Configuration (providers/models/gateway) is managed via the CLI,
+        # which writes config.yaml + secrets.enc and restarts the daemon; the
+        # write/test endpoints were removed to close the programmatic SSRF
+        # entry (arbitrary base_url injection/fetch at runtime).
         Route("/api/status", control_status, methods=["GET"]),
-        Route("/api/models", control_models, methods=["GET"]),
-        Route("/api/models", control_models_delete, methods=["DELETE"]),
-        Route("/api/providers", control_providers, methods=["GET", "POST", "DELETE"]),
-        Route("/api/providers/test", control_test_provider, methods=["POST"]),
-        Route("/api/providers/models", control_fetch_models, methods=["POST"]),
-        Route("/api/gateway/config", control_gateway_config, methods=["GET", "POST"]),
         Route("/api/daemon/stop", control_daemon_stop, methods=["POST"]),
         Route("/api/daemon/restart", control_daemon_restart, methods=["POST"]),
     ]

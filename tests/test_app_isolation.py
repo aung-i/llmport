@@ -58,10 +58,10 @@ class TestSingleAppStructure:
         app, tmp = _make_app()
         try:
             paths = {r.path for r in app.routes}
-            # Control API
+            # Control API (read-only status + lifecycle only)
             assert "/api/status" in paths, "Missing /api/status control route"
-            assert "/api/models" in paths, "Missing /api/models control route"
-            assert "/api/providers" in paths, "Missing /api/providers control route"
+            assert "/api/daemon/stop" in paths, "Missing /api/daemon/stop control route"
+            assert "/api/daemon/restart" in paths, "Missing /api/daemon/restart control route"
             # OpenAI protocol
             assert "/openai/v1/chat/completions" in paths
             assert "/openai/v1/models" in paths
@@ -201,12 +201,6 @@ class TestControlApiModule:
         from llmport.gateway import control_api
         expected = [
             "control_status",
-            "control_models",
-            "control_models_delete",
-            "control_providers",
-            "control_test_provider",
-            "control_fetch_models",
-            "control_gateway_config",
             "control_daemon_stop",
             "control_daemon_restart",
         ]

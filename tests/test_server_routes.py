@@ -73,11 +73,10 @@ class TestCreateApp:
             assert app.__class__.__name__ == "Starlette"
 
     def test_app_has_correct_route_count(self):
-        """The single app has 15 routes (6 protocol + 9 control registrations,
-        where /api/models is registered twice for GET and DELETE)."""
+        """The single app has 9 routes (6 protocol + 3 control: status + 2 lifecycle)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = gateway_server.create_app(_make_store(tmp))
-            assert len(app.routes) == 15
+            assert len(app.routes) == 9
 
     def test_protocol_route_paths_present(self):
         """Each expected protocol route path is registered."""
@@ -93,19 +92,21 @@ class TestCreateApp:
             assert "/v1/messages" in paths
 
     def test_control_route_paths_present(self):
-        """Each expected control route path is registered (no /api/models/switch)."""
+        """Only read-only status + lifecycle control routes are registered."""
         with tempfile.TemporaryDirectory() as tmp:
             app = gateway_server.create_app(_make_store(tmp))
 
             paths = {r.path for r in app.routes}
+            # The only control routes left.
             assert "/api/status" in paths
-            assert "/api/models" in paths
-            assert "/api/providers" in paths
-            assert "/api/providers/test" in paths
-            assert "/api/providers/models" in paths
-            assert "/api/gateway/config" in paths
             assert "/api/daemon/stop" in paths
             assert "/api/daemon/restart" in paths
+            # Config write/test/fetch endpoints were removed (SSRF surface).
+            assert "/api/models" not in paths
+            assert "/api/providers" not in paths
+            assert "/api/providers/test" not in paths
+            assert "/api/providers/models" not in paths
+            assert "/api/gateway/config" not in paths
             # The old /api/models/switch route has been removed.
             assert "/api/models/switch" not in paths
 
@@ -129,12 +130,11 @@ class TestCreateApp:
             assert "POST" in catchall.methods
             assert "GET" in catchall.methods
 
-            # /api/models is registered for both GET and DELETE.
-            models_methods = set()
-            for r in by_path["/api/models"]:
-                models_methods |= r.methods
-            assert "GET" in models_methods
-            assert "DELETE" in models_methods
+            # /api/status is GET-only (Starlette auto-adds HEAD).
+            assert "GET" in by_path["/api/status"][0].methods
+            # Lifecycle endpoints are POST-only.
+            assert by_path["/api/daemon/stop"][0].methods == {"POST"}
+            assert by_path["/api/daemon/restart"][0].methods == {"POST"}
 
     def test_init_state_called(self):
         """create_app calls init_state so get_state() works afterwards.
@@ -307,52 +307,6 @@ class TestOpenaiModels:
             assert resp.status_code == 200
             body = resp.json()
             assert body["data"] == []
-
-
-# ============================================================================
-# DELETE /api/models
-# ============================================================================
-
-class TestControlModelsDelete:
-    """Test the DELETE /api/models endpoint."""
-
-    def test_delete_model_by_name_returns_ok(self):
-        """DELETE /api/models with a valid 'name' returns ok."""
-        with tempfile.TemporaryDirectory() as tmp:
-            app = _make_app(tmp)
-            client = TestClient(app)
-            resp = client.request("DELETE", "/api/models", json={"name": "gpt5"})
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["ok"] is True
-
-    def test_delete_model_by_model_id_returns_ok(self):
-        """DELETE /api/models also accepts 'model_id' for back-compat."""
-        with tempfile.TemporaryDirectory() as tmp:
-            app = _make_app(tmp)
-            client = TestClient(app)
-            resp = client.request("DELETE", "/api/models",
-                                  json={"model_id": "gpt5"})
-            assert resp.status_code == 200
-            assert resp.json()["ok"] is True
-
-    def test_delete_model_missing_name_returns_400(self):
-        """DELETE /api/models without a name returns 400."""
-        with tempfile.TemporaryDirectory() as tmp:
-            app = _make_app(tmp)
-            client = TestClient(app)
-            resp = client.request("DELETE", "/api/models", json={})
-            assert resp.status_code == 400
-
-    def test_delete_model_removes_from_state(self):
-        """After deletion the model no longer appears in /api/models."""
-        with tempfile.TemporaryDirectory() as tmp:
-            app = _make_app(tmp)
-            client = TestClient(app)
-            resp = client.request("DELETE", "/api/models", json={"name": "gpt5"})
-            assert resp.status_code == 200
-            models = client.get("/api/models").json()["models"]
-            assert all(m["name"] != "gpt5" for m in models)
 
 
 class TestOpenaiCatchall:

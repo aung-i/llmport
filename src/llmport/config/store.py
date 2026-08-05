@@ -240,7 +240,14 @@ class ConfigStore:
         return data
 
     def save_config(self, data: dict) -> None:
-        """Write the readable config. Must NOT contain API keys."""
+        """Write the readable config. Must NOT contain API keys.
+
+        Validates provider base_urls against the SSRF blocklist (see
+        :mod:`llmport.config.validation`) so every write path -- CLI and any
+        future config editor -- is guarded from one place.
+        """
+        from llmport.config.validation import validate_config
+        validate_config(data)
         self.dir.mkdir(parents=True, exist_ok=True)
         plaintext = yaml.dump(
             data, default_flow_style=False, allow_unicode=True, sort_keys=False
