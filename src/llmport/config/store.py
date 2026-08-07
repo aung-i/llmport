@@ -13,7 +13,8 @@ itself is 0700, so a 0644 file is still owner-only in practice; 0644 is the
 *signal* that the file is non-secret.)
 
 Providers are self-contained: ``base_url`` and ``api_key`` live together in
-``providers.yaml`` so ``llmport provider test`` only needs that one file.
+``providers.yaml``; ``llmport model test`` reads both files (models from
+``config.yaml``, keys from ``providers.yaml``).
 
 Legacy ``secrets.yaml`` from the old vault layout is deleted on init. An
 ancient single-file ``config.yaml`` (one containing a ``providers`` key) is

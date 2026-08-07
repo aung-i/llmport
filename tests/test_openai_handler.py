@@ -25,9 +25,8 @@ def provider() -> ProviderConfig:
 # ===========================================================================
 # list_models() tests
 # ===========================================================================
-# NOTE: openai_handler.list_models() does ``import httpx`` inside the
-# function body (no module-level httpx import), so we patch the global
-# ``httpx.AsyncClient`` rather than a dotted path on the handler module.
+# openai_handler imports httpx at module level, so we patch the global
+# ``httpx.AsyncClient`` (the handler references the same module object).
 
 @pytest.mark.asyncio
 async def test_list_models_success(provider):
@@ -92,6 +91,168 @@ async def test_list_models_exception(provider):
 
     assert models is None
     assert error == "connection failed"
+
+
+# ===========================================================================
+# test_connection() tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_test_connection_success(provider):
+    """test_connection() returns (True, latency, None, reply) on 2xx."""
+    from llmport.gateway.openai_handler import test_connection
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "有效"}}]
+    }
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.return_value = mock_resp
+
+        ok, latency, error, reply = await test_connection(provider, "gpt-5")
+
+    assert ok is True
+    assert error is None
+    assert reply == "有效"
+    assert latency >= 0
+    args, kwargs = mock_client.post.call_args
+    assert args[0] == "https://api.openai.com/v1/chat/completions"
+    assert kwargs["headers"]["Authorization"] == "Bearer sk-test-123"
+    assert kwargs["json"]["model"] == "gpt-5"
+    assert kwargs["json"]["max_tokens"] == 128  # room for reasoning models to reply
+    # the prompt asks for a one-word reply, so output stays tiny
+    assert kwargs["json"]["messages"][0]["content"] == "只回复：有效"
+
+
+@pytest.mark.asyncio
+async def test_test_connection_reasoning_model(provider):
+    """Reasoning model with empty ``content`` falls back to ``reasoning_content``."""
+    from llmport.gateway.openai_handler import test_connection
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{
+            "message": {"content": "", "reasoning_content": "思考中…"},
+            "finish_reason": "length",
+        }]
+    }
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.return_value = mock_resp
+
+        ok, _latency, error, reply = await test_connection(provider, "deepseek-v4-pro")
+
+    assert ok is True
+    assert error is None
+    assert reply == "思考中…"  # fell back to reasoning_content
+
+
+@pytest.mark.asyncio
+async def test_test_connection_success_no_reply(provider):
+    """2xx with a non-standard body is still ok; reply is None (best-effort)."""
+    from llmport.gateway.openai_handler import test_connection
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"unexpected": "shape"}
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.return_value = mock_resp
+
+        ok, latency, error, reply = await test_connection(provider, "gpt-5")
+
+    assert ok is True
+    assert error is None
+    assert reply is None
+
+
+@pytest.mark.asyncio
+async def test_test_connection_key_invalid(provider):
+    """test_connection() reports an invalid key on 401/403."""
+    from llmport.gateway.openai_handler import test_connection
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.return_value = mock_resp
+
+        ok, latency, error, reply = await test_connection(provider, "gpt-5")
+
+    assert ok is False
+    assert reply is None
+    assert "key 无效" in error
+    assert "401" in error
+
+
+@pytest.mark.asyncio
+async def test_test_connection_model_not_found(provider):
+    """404 means the model name doesn't exist -- a model issue, not the key."""
+    from llmport.gateway.openai_handler import test_connection
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.return_value = mock_resp
+
+        ok, latency, error, reply = await test_connection(provider, "no-such-model")
+
+    assert ok is False
+    assert reply is None
+    assert "404" in error
+    assert "no-such-model" in error
+
+
+@pytest.mark.asyncio
+async def test_test_connection_other_error_status(provider):
+    """test_connection() reports the upstream status for other 4xx/5xx."""
+    from llmport.gateway.openai_handler import test_connection
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.return_value = mock_resp
+
+        ok, latency, error, reply = await test_connection(provider, "gpt-5")
+
+    assert ok is False
+    assert reply is None
+    assert "429" in error
+
+
+@pytest.mark.asyncio
+async def test_test_connection_exception(provider):
+    """test_connection() returns (False, 0.0, error, None) on network exception."""
+    from llmport.gateway.openai_handler import test_connection
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post.side_effect = httpx.ConnectError("boom")
+
+        ok, latency, error, reply = await test_connection(provider, "gpt-5")
+
+    assert ok is False
+    assert reply is None
+    assert latency == 0.0
+    assert error == "boom"
 
 
 # ===========================================================================

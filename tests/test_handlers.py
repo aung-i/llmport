@@ -18,6 +18,7 @@ def test_openai_handler_exists():
     assert hasattr(openai_handler, "forward")
     assert hasattr(openai_handler, "stream")
     assert hasattr(openai_handler, "list_models")
+    assert hasattr(openai_handler, "test_connection")
 
 
 def test_anthropic_handler_exists():

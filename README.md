@@ -28,10 +28,10 @@ llmport config edit [-t config|providers]  # 用 $EDITOR 打开配置文件
 llmport config path      # 打印配置文件路径
 llmport provider add     # 添加/更新供应商（base_url + API key 一起存 providers.yaml）
 llmport provider list    # 列出供应商
-llmport provider test <id>  # 测试供应商连通性（只读 providers.yaml，不需网关运行）
-llmport provider remove <id>
+llmport provider remove <name>
 llmport model add        # 添加/更新模型映射（写入 config.yaml）
 llmport model list
+llmport model test <name>  # 验连通 + key + 模型（按模型探测每个绑定，不需网关，详见 docs/model-test.md）
 llmport model remove <name>
 llmport start [--host H --port P]   # 启动网关（需先配置供应商）
 llmport stop             # 停止网关
@@ -45,8 +45,8 @@ llmport                  # 打印帮助
 ```bash
 # 示例：加供应商（key 不回显，推荐不传 --api-key 交互输入）
 llmport provider add --name anthropic --protocol anthropic
-llmport provider test anthropic     # 验证连通，OpenAI 还会列出可用模型
 llmport model add --name claude-sonnet --provider anthropic --upstream claude-sonnet-4
+llmport model test claude-sonnet    # 验连通 + key + 模型（按模型测，详见 docs/model-test.md）
 llmport start
 ```
 

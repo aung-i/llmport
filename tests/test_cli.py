@@ -433,75 +433,180 @@ class TestConfigCommands:
 
 
 # ===========================================================================
-# provider test
+# model test
 # ===========================================================================
 
 
-class TestProviderTestCommand:
-    """`llmport provider test <name>` -- daemon-independent connectivity test."""
+class TestModelTestCommand:
+    """`llmport model test <name>` -- probes each binding, daemon-independent."""
 
-    def _add(self, tmp_path, monkeypatch, pid="p", protocol="openai", key="sk"):
+    def _add_model(self, tmp_path, monkeypatch, mid="m", pid="p",
+                   protocol="openai", key="sk", upstream=None):
         invoke(["llmport", "provider", "add", "--name", pid,
                 "--protocol", protocol, "--api-key", key], tmp_path, monkeypatch)
+        argv = ["llmport", "model", "add", "--name", mid, "--provider", pid]
+        if upstream:
+            argv += ["--upstream", upstream]
+        invoke(argv, tmp_path, monkeypatch)
 
-    def test_openai_success_lists_models(self, tmp_path, monkeypatch):
-        self._add(tmp_path, monkeypatch)
-        with patch("llmport.gateway.openai_handler.list_models",
-                   new_callable=AsyncMock) as mock_lm:
-            mock_lm.return_value = ([{"id": "gpt-5"}, {"id": "gpt-4"}], None)
-            result = invoke(["llmport", "provider", "test", "p"], tmp_path, monkeypatch)
-        assert "连通" in result.stdout
-        assert "gpt-5" in result.stdout and "gpt-4" in result.stdout
+    def test_openai_success(self, tmp_path, monkeypatch):
+        self._add_model(tmp_path, monkeypatch, mid="m", pid="p", upstream="m-real")
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.return_value = (True, 123.0, None, "有效")
+            result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
+        assert result.exit_code == 0
+        assert "状态" in result.stdout  # table header
+        assert "p/m-real" in result.stdout
+        assert "✓" in result.stdout
+        assert "123ms" in result.stdout
+        assert "有效" in result.stdout  # the reply is shown
+        # probed with the binding's upstream, not a guessed list_models entry
+        assert mock_tc.call_args.args[1] == "m-real"
 
     def test_anthropic_success(self, tmp_path, monkeypatch):
-        self._add(tmp_path, monkeypatch, pid="a", protocol="anthropic")
+        self._add_model(tmp_path, monkeypatch, mid="c", pid="a",
+                        protocol="anthropic", upstream="claude-sonnet-5")
         with patch("llmport.gateway.anthropic_handler.test_connection",
                    new_callable=AsyncMock) as mock_tc:
-            mock_tc.return_value = (True, 123.0, None)
-            result = invoke(["llmport", "provider", "test", "a"], tmp_path, monkeypatch)
-        assert "连通" in result.stdout
+            mock_tc.return_value = (True, 456.0, None, "有效")
+            result = invoke(["llmport", "model", "test", "c"], tmp_path, monkeypatch)
+        assert result.exit_code == 0
+        assert "a/claude-sonnet-5" in result.stdout
+        assert "✓" in result.stdout
+        assert "456ms" in result.stdout
+        assert "有效" in result.stdout
+        assert mock_tc.call_args.args[1] == "claude-sonnet-5"
 
-    def test_not_found(self, tmp_path, monkeypatch):
-        self._add(tmp_path, monkeypatch)
-        result = invoke(["llmport", "provider", "test", "nope"], tmp_path, monkeypatch)
-        assert "未找到" in result.stdout
+    def test_key_invalid_exits_nonzero(self, tmp_path, monkeypatch):
+        self._add_model(tmp_path, monkeypatch, upstream="m-real")
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.return_value = (False, 100.0, "key 无效 (401)", None)
+            result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
+        assert result.exit_code == 1
+        assert "p/m-real" in result.stdout
+        assert "✗" in result.stdout
+        assert "key 无效" in result.stdout
+
+    def test_model_not_found_exits_nonzero(self, tmp_path, monkeypatch):
+        """404 on the upstream -> model-name mismatch, reported per binding."""
+        self._add_model(tmp_path, monkeypatch, upstream="no-such")
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.return_value = (False, 100.0, "模型 no-such 不存在 (404)", None)
+            result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
+        assert result.exit_code == 1
+        assert "404" in result.stdout
+
+    def test_unknown_model(self, tmp_path, monkeypatch):
+        self._add_model(tmp_path, monkeypatch, mid="m")
+        result = invoke(["llmport", "model", "test", "nope"], tmp_path, monkeypatch)
+        assert "未找到模型 nope" in result.stdout
+        assert "已配置: m" in result.stdout
+
+    def test_no_models(self, tmp_path, monkeypatch):
+        result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
+        assert "无模型" in result.stdout
+
+    def test_provider_not_configured(self, tmp_path, monkeypatch):
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.save_models_config({"models": {"m": "ghost"}})
+        result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
+        assert "供应商 ghost 未配置" in result.stdout
+        assert result.exit_code == 1
+
+    def test_multi_binding_partial(self, tmp_path, monkeypatch):
+        """Two bindings, one healthy -> exit 0; both rows appear in the table."""
+        from llmport.config.store import ConfigStore
+
+        invoke(["llmport", "provider", "add", "--name", "openai",
+                "--protocol", "openai", "--api-key", "sk1"], tmp_path, monkeypatch)
+        invoke(["llmport", "provider", "add", "--name", "azure",
+                "--protocol", "openai", "--api-key", "sk2"], tmp_path, monkeypatch)
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.save_models_config(
+            {"models": {"gpt-4o": [{"openai": "gpt-4o"}, {"azure": "gpt4o-deploy"}]}})
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.side_effect = [(True, 123.0, None, "有效"),
+                                   (False, 100.0, "key 无效 (401)", None)]
+            result = invoke(["llmport", "model", "test", "gpt-4o"],
+                            tmp_path, monkeypatch)
+        assert result.exit_code == 0  # at least one healthy path
+        assert "openai/gpt-4o" in result.stdout
+        assert "azure/gpt4o-deploy" in result.stdout
+        assert "✓" in result.stdout
+        assert "✗" in result.stdout
+        assert "有效" in result.stdout
+        # upstream mapping preserved per binding, in order
+        ups = [c.args[1] for c in mock_tc.call_args_list]
+        assert ups == ["gpt-4o", "gpt4o-deploy"]
 
     def test_no_key(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        self._add(tmp_path, monkeypatch)
-        # Clear the key from the provider entry (key lives in providers.yaml now).
+        self._add_model(tmp_path, monkeypatch, upstream="m-real")
         store = ConfigStore(str(tmp_path / "llmport"))
         pdata = store.load_providers_config()
         pdata["providers"][0]["api_key"] = ""
         store.save_providers_config(pdata)
-        result = invoke(["llmport", "provider", "test", "p"], tmp_path, monkeypatch)
+        result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
         assert "未设置 API key" in result.stdout
-
-    def test_no_config(self, tmp_path, monkeypatch):
-        result = invoke(["llmport", "provider", "test", "p"], tmp_path, monkeypatch)
-        assert "无配置文件" in result.stdout
-
-    def test_openai_failure_exits_nonzero(self, tmp_path, monkeypatch):
-        self._add(tmp_path, monkeypatch)
-        with patch("llmport.gateway.openai_handler.list_models",
-                   new_callable=AsyncMock) as mock_lm:
-            mock_lm.return_value = (None, "401 Unauthorized")
-            result = invoke(["llmport", "provider", "test", "p"], tmp_path, monkeypatch)
         assert result.exit_code == 1
-        assert "失败" in result.stdout
 
     def test_empty_error_falls_back_to_generic_message(self, tmp_path, monkeypatch):
-        """An empty error string (e.g. a connection exception with no message)
-        still yields a useful failure line instead of a bare '✗ 失败: '."""
-        self._add(tmp_path, monkeypatch)
-        with patch("llmport.gateway.openai_handler.list_models",
-                   new_callable=AsyncMock) as mock_lm:
-            mock_lm.return_value = (None, "")
-            result = invoke(["llmport", "provider", "test", "p"], tmp_path, monkeypatch)
+        """An empty error string still yields a useful failure row."""
+        self._add_model(tmp_path, monkeypatch, upstream="m-real")
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.return_value = (False, 0.0, "", None)
+            result = invoke(["llmport", "model", "test", "m"], tmp_path, monkeypatch)
         assert result.exit_code == 1
-        assert "失败" in result.stdout
-        assert "连接失败" in result.stdout  # generic fallback, not a bare colon
+        assert "p/m-real" in result.stdout
+        assert "✗" in result.stdout
+        assert "连接失败" in result.stdout  # generic fallback, not a bare cell
+
+    def test_all_models_success(self, tmp_path, monkeypatch):
+        """`model test` with no name probes every configured model."""
+        from llmport.config.store import ConfigStore
+
+        invoke(["llmport", "provider", "add", "--name", "p1",
+                "--protocol", "openai", "--api-key", "sk1"], tmp_path, monkeypatch)
+        invoke(["llmport", "provider", "add", "--name", "p2",
+                "--protocol", "openai", "--api-key", "sk2"], tmp_path, monkeypatch)
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.save_models_config({"models": {"m1": "p1", "m2": "p2"}})
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.return_value = (True, 100.0, None, "有效")
+            result = invoke(["llmport", "model", "test"], tmp_path, monkeypatch)
+        assert result.exit_code == 0
+        assert "m1" in result.stdout and "m2" in result.stdout
+        assert "汇总" in result.stdout
+        assert "2/2 模型可用" in result.stdout
+        assert "有效" in result.stdout
+        assert mock_tc.call_count == 2  # one probe per model
+
+    def test_all_models_one_unusable_exits_nonzero(self, tmp_path, monkeypatch):
+        """One model fully failed -> exit 1, summary reports X/Y 模型可用."""
+        from llmport.config.store import ConfigStore
+
+        invoke(["llmport", "provider", "add", "--name", "p1",
+                "--protocol", "openai", "--api-key", "sk1"], tmp_path, monkeypatch)
+        invoke(["llmport", "provider", "add", "--name", "p2",
+                "--protocol", "openai", "--api-key", "sk2"], tmp_path, monkeypatch)
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.save_models_config({"models": {"m1": "p1", "m2": "p2"}})
+        with patch("llmport.gateway.openai_handler.test_connection",
+                   new_callable=AsyncMock) as mock_tc:
+            mock_tc.side_effect = [(True, 100.0, None, "有效"),
+                                   (False, 0.0, "key 无效 (401)", None)]
+            result = invoke(["llmport", "model", "test"], tmp_path, monkeypatch)
+        assert result.exit_code == 1
+        assert "1/2 模型可用" in result.stdout
 
 
 # ===========================================================================

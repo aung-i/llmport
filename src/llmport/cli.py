@@ -11,6 +11,7 @@ they stay callable from tests without going through argv parsing.
 import getpass
 import os
 import subprocess
+import unicodedata
 from typing import Literal
 
 import typer
@@ -150,11 +151,6 @@ def _cli_provider_remove(name: str = typer.Argument(..., help="供应商 name"))
     _provider_remove(DaemonManager(), name)
 
 
-@provider_app.command("test")
-def _cli_provider_test(name: str = typer.Argument(..., help="供应商 name")) -> None:
-    _provider_test(DaemonManager(), name)
-
-
 # --- model commands --------------------------------------------------------
 
 
@@ -175,6 +171,13 @@ def _cli_model_list() -> None:
 @model_app.command("remove")
 def _cli_model_remove(name: str = typer.Argument(..., help="模型公开名")) -> None:
     _model_remove(DaemonManager(), name)
+
+
+@model_app.command("test")
+def _cli_model_test(
+    name: str = typer.Argument(None, help="模型公开名（省略则测全部模型）"),
+) -> None:
+    _model_test(DaemonManager(), name)
 
 
 # --- config commands -------------------------------------------------------
@@ -333,75 +336,6 @@ def _provider_remove(dm: DaemonManager, name: str) -> None:
     _apply_if_running(dm)
 
 
-def _provider_test(dm: DaemonManager, name: str) -> None:
-    """Test a configured provider's connection directly from disk.
-
-    No daemon required: reads providers.yaml (which holds the api_key
-    alongside base_url), then calls the same handler functions the control
-    API uses. For OpenAI it lists upstream models (handy for picking the
-    ``upstream`` name in a model mapping); for Anthropic it sends a minimal
-    1-token request.
-    """
-    import asyncio
-
-    store = dm.store
-    pdata = _safe_load_providers(store)
-    if not pdata:
-        print("无配置文件。运行 `llmport config init` 或 `llmport provider add`。")
-        return
-    providers = pdata.get("providers", [])
-    entry = next((p for p in providers if p.get("name") == name), None)
-    if not entry:
-        names = ", ".join(p.get("name", "") for p in providers) or "（无）"
-        print(f"未找到供应商 {name}。已配置: {names}")
-        return
-    api_key = entry.get("api_key", "")
-    if not api_key:
-        print(f"供应商 {name} 未设置 API key。")
-        print(f"运行 `llmport provider add --name {name} --api-key <key>` 补上。")
-        return
-
-    from llmport.models.provider import ProviderConfig
-    provider = ProviderConfig(
-        name=name,
-        protocol=entry.get("protocol", "openai"),
-        base_url=entry.get("base_url", ""),
-        api_key=api_key,
-    )
-    print(f"测试 {name} ({provider.protocol}, {provider.base_url}) ...")
-    result = asyncio.run(_provider_test_async(provider))
-    if result["ok"]:
-        print(f"✓ 连通 ({result['latency_ms']:.0f}ms)")
-        models = result.get("models")
-        if models:
-            ids = [m.get("id") for m in models
-                   if isinstance(m, dict) and m.get("id")]
-            print(f"  可用模型 ({len(ids)}):")
-            for mid in ids[:20]:
-                print(f"    {mid}")
-            if len(ids) > 20:
-                print(f"    ... 还有 {len(ids) - 20} 个")
-    else:
-        err = result["error"] or "连接失败（上游无响应或网络错误）"
-        print(f"✗ 失败: {err}")
-        raise SystemExit(1)
-
-
-async def _provider_test_async(provider) -> dict:
-    """Run the protocol-appropriate connectivity test, return a result dict."""
-    import time
-    from llmport.gateway import openai_handler, anthropic_handler
-
-    if provider.protocol == "openai":
-        t0 = time.monotonic()
-        models, error = await openai_handler.list_models(provider)
-        latency = (time.monotonic() - t0) * 1000
-        return {"ok": models is not None, "latency_ms": latency,
-                "error": error, "models": models}
-    ok, latency, error = await anthropic_handler.test_connection(provider)
-    return {"ok": ok, "latency_ms": latency, "error": error, "models": None}
-
-
 # ============================================================================
 # model add / list / remove
 # ============================================================================
@@ -442,10 +376,10 @@ def _model_list(dm: DaemonManager) -> None:
         print("无模型。运行 `llmport model add --name <n> --provider <p>` 添加。")
         return
     from llmport.models.model import parse_models_config
-    print(f"{'公开名':<20} {'供应商':<14} {'upstream':<24}")
+    print(f"{'公开名':<22} 绑定（provider/upstream，-> 为 fallback 顺序）")
     for m in parse_models_config(mdata.get("models")):
-        for b in m.bindings:
-            print(f"{m.name:<20} {b.provider:<14} {b.upstream:<24}")
+        chain = " -> ".join(f"{b.provider}/{b.upstream}" for b in m.bindings)
+        print(f"{m.name:<22} {chain}")
 
 
 def _model_remove(dm: DaemonManager, name: str) -> None:
@@ -463,6 +397,162 @@ def _model_remove(dm: DaemonManager, name: str) -> None:
     store.save_models_config(mdata)
     print(f"已删除模型 {name}。")
     _apply_if_running(dm)
+
+
+# ============================================================================
+# model test
+# ============================================================================
+
+
+def _model_test(dm: DaemonManager, name: str | None = None) -> None:
+    """Test configured model(s) by probing each provider binding.
+
+    With a ``name``, probes that model's bindings. Without one, probes every
+    configured model. No daemon required: reads bindings from ``config.yaml``
+    and providers/keys from ``providers.yaml``, then sends a short request to
+    each via the same handler functions the runtime uses. The upstream model
+    name comes straight from the binding -- no --model flag, no hardcoded
+    fallback. The status code verifies key + model together: 401/403 = bad
+    key, 404 = upstream model not found, 2xx = ok; the prompt asks the model
+    to reply "有效", which is shown in the table as proof it actually responded.
+
+    A model with at least one healthy binding is "可用" (matching Router
+    semantics). Exits nonzero if any probed model has zero healthy bindings
+    (i.e. is unusable); a fully-healthy run exits 0.
+    """
+    import asyncio
+
+    store = dm.store
+    mdata = _safe_load_models(store)
+    if not mdata or not mdata.get("models"):
+        print("无模型。运行 `llmport model add --name <n> --provider <p>` 添加。")
+        return
+    from llmport.models.model import parse_models_config
+    all_models = parse_models_config(mdata.get("models"))
+    if name is not None:
+        target = next((m for m in all_models if m.name == name), None)
+        if not target:
+            names = ", ".join(m.name for m in all_models) or "（无）"
+            print(f"未找到模型 {name}。已配置: {names}")
+            return
+        targets = [target]
+    else:
+        targets = all_models
+
+    pdata = _safe_load_providers(store)
+    providers = (pdata or {}).get("providers", [])
+    by_name = {p.get("name"): p for p in providers}
+
+    probed = asyncio.run(_probe_all_models(targets, by_name))
+    rows = []
+    unusable = 0
+    for model, results in probed:
+        if not any(r["ok"] for r in results):
+            unusable += 1
+        for r in results:
+            binding = f"{r['provider']}/{r['upstream']}"
+            if r["ok"]:
+                reply = r.get("reply")
+                detail = _trunc(reply) if reply else "（无回复）"
+                rows.append((model.name, binding, "✓",
+                             f"{r['latency_ms']:.0f}ms", detail))
+            else:
+                err = r.get("error") or "连接失败（上游无响应或网络错误）"
+                rows.append((model.name, binding, "✗", "-", _trunc(err)))
+    _print_test_table(rows)
+    if len(probed) > 1:
+        usable = len(probed) - unusable
+        print()
+        print(f"汇总: {usable}/{len(probed)} 模型可用")
+    if unusable > 0:
+        raise SystemExit(1)
+
+
+def _disp_width(s: str) -> int:
+    """Display width of ``s``, counting CJK/fullwidth chars as 2 columns."""
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+               for c in s)
+
+
+def _pad(s: str, width: int) -> str:
+    """Left-justify ``s`` to a display ``width`` with trailing spaces."""
+    return s + " " * max(0, width - _disp_width(s))
+
+
+def _trunc(text: str, limit: int = 40) -> str:
+    """Collapse whitespace to single spaces and truncate to ``limit`` chars."""
+    one_line = " ".join(text.split())
+    if len(one_line) > limit:
+        return one_line[:limit] + "…"
+    return one_line
+
+
+def _print_test_table(rows: list[tuple[str, str, str, str, str]]) -> None:
+    """Print probe results as a display-width-aligned table.
+
+    Each row is ``(model, binding, status, latency, detail)``. The last column
+    is left unpadded (no trailing spaces); the rest are padded so CJK content
+    stays aligned.
+    """
+    headers = ("模型", "绑定", "状态", "延时", "详情")
+
+    def fmt(row):
+        left = "  ".join(_pad(row[i], widths[i]) for i in range(len(headers) - 1))
+        return left + "  " + row[-1]
+
+    cells = [headers, *rows]
+    widths = [max(_disp_width(c[i]) for c in cells) for i in range(len(headers))]
+    lines = [fmt(headers)] + [fmt(r) for r in rows]
+    print(lines[0])
+    print("-" * max(_disp_width(l) for l in lines))
+    for line in lines[1:]:
+        print(line)
+
+
+async def _probe_all_models(models, providers_by_name) -> list[tuple]:
+    """Probe each model's bindings in order; return ``(model, results)`` per model."""
+    return [(m, await _model_test_async(m, providers_by_name)) for m in models]
+
+
+async def _model_test_async(model, providers_by_name) -> list[dict]:
+    """Probe each binding in order; return one result dict per binding.
+
+    A missing provider or key is reported as a failed binding rather than
+    skipped, so every binding's status is visible.
+    """
+    from llmport.models.provider import ProviderConfig
+    from llmport.gateway import openai_handler, anthropic_handler
+
+    results = []
+    for b in model.bindings:
+        entry = providers_by_name.get(b.provider)
+        if not entry:
+            results.append({"provider": b.provider, "upstream": b.upstream,
+                            "ok": False, "latency_ms": 0.0,
+                            "error": f"供应商 {b.provider} 未配置", "reply": None})
+            continue
+        api_key = entry.get("api_key", "")
+        if not api_key:
+            results.append({"provider": b.provider, "upstream": b.upstream,
+                            "ok": False, "latency_ms": 0.0,
+                            "error": "未设置 API key", "reply": None})
+            continue
+        provider = ProviderConfig(
+            name=b.provider,
+            protocol=entry.get("protocol", "openai"),
+            base_url=entry.get("base_url", ""),
+            api_key=api_key,
+        )
+        if provider.protocol == "anthropic":
+            ok, latency, error, reply = await anthropic_handler.test_connection(
+                provider, b.upstream)
+        else:
+            ok, latency, error, reply = await openai_handler.test_connection(
+                provider, b.upstream)
+        results.append({"provider": b.provider, "upstream": b.upstream,
+                        "ok": ok, "latency_ms": latency, "error": error,
+                        "reply": reply})
+    return results
 
 
 # ============================================================================
