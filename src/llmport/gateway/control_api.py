@@ -34,7 +34,6 @@ async def control_status(request: Request) -> JSONResponse:
         "models": [m.name for m in state.models],
         "providers": [
             {
-                "id": p.id,
                 "name": p.name,
                 "status": p.health.status,
                 "latency_ms": p.health.latency_ms,

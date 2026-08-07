@@ -8,14 +8,12 @@ class ModelBinding:
     """Binds a public model name to a specific provider's upstream model.
 
     Attributes:
-        provider: the provider id this binding routes to.
+        provider: the provider name this binding routes to.
         upstream: the real model name on that provider's API.
-        priority: fallback order (1 = primary, 2+ = fallback).
     """
 
     provider: str
     upstream: str
-    priority: int = 1
 
 
 @dataclass
@@ -24,75 +22,86 @@ class LogicalModel:
 
     Attributes:
         name: the public model name clients send in ``{"model": name}``.
-        bindings: provider bindings, tried in priority order for fallback.
-        routing_strategy: how the next provider is picked on failure.
-            Currently only ``"priority_fallback"`` is supported: providers
-            are tried in priority order and the first healthy one is used.
+        bindings: provider bindings, tried in list order for fallback.
+            The first healthy provider wins; on failure the next binding is
+            tried, which may be another upstream on the same provider.
     """
 
     name: str
     bindings: list[ModelBinding] = field(default_factory=list)
-    routing_strategy: str = "priority_fallback"
 
     @property
     def provider_count(self) -> int:
         return len({b.provider for b in self.bindings})
 
-    @property
-    def bindings_sorted(self) -> list[ModelBinding]:
-        return sorted(self.bindings, key=lambda b: b.priority)
 
-
-def parse_models_config(models_data: list[dict] | None) -> list[LogicalModel]:
+def parse_models_config(models_data) -> list[LogicalModel]:
     """Parse the ``models`` config section into :class:`LogicalModel` instances.
 
-    Two entry shapes are supported:
+    ``models`` is a dict keyed by the public model name. Each value is
+    normalized into an ordered list of ``(provider, upstream)`` bindings;
+    ``upstream`` defaults to the public name when omitted. Bindings are
+    tried in order for fallback.
 
-    Shorthand (single binding, no fallback)::
+    Supported value forms (all normalize to bindings)::
 
-        - name: claude-sonnet
-          provider: anthropic
-          upstream: claude-sonnet-4
+        claude-sonnet: anthropic                 # str -> single provider, upstream=name
+        gpt-4o:                                   # list of providers (upstream=name)
+          - openai
+          - azure
+        sonnet:                                   # provider: single upstream
+          - anthropic: claude-sonnet-4
+        gpt4:                                     # provider: list of upstreams (fallback)
+          - openai: gpt-4
+          - azure: [gpt4o-deploy, gpt4o-turbo]
 
-    Full form (multiple bindings for fallback)::
-
-        - name: gpt-4o
-          bindings:
-            - {provider: openai, upstream: gpt-4o, priority: 1}
-            - {provider: azure-openai, upstream: gpt4o-deploy, priority: 2}
+    A list element may be a plain provider name (str) or a single-key
+    ``{provider: upstream}`` dict whose upstream is a str or a list. A bare
+    dict value (no enclosing list) is also accepted for a single-provider
+    alias. Malformed entries are skipped rather than crashing the daemon.
     """
     models: list[LogicalModel] = []
-    for entry in models_data or []:
-        name = entry.get("name") or entry.get("id")
-        if not name:
-            continue
-        strategy = entry.get("routing_strategy", "priority_fallback")
-        if "bindings" in entry:
-            raw = entry.get("bindings") or []
-        else:
-            raw = [{
-                "provider": entry.get("provider"),
-                "upstream": entry.get("upstream"),
-                "priority": entry.get("priority", 1),
-            }]
-        bindings: list[ModelBinding] = []
-        for b in raw:
-            provider = b.get("provider")
-            upstream = b.get("upstream")
-            if not provider or not upstream:
-                # Skip a malformed binding (e.g. a hand-edited config typo)
-                # instead of crashing the daemon at startup with a KeyError.
-                continue
-            bindings.append(
-                ModelBinding(
-                    provider=provider,
-                    upstream=upstream,
-                    priority=b.get("priority", 1),
-                )
-            )
-        if not bindings:
-            continue  # no usable bindings -> drop this model
-        models.append(
-            LogicalModel(name=name, bindings=bindings, routing_strategy=strategy)
-        )
+    if not isinstance(models_data, dict):
+        return models
+    for name, value in models_data.items():
+        bindings = _normalize_bindings(value, name)
+        if bindings:
+            models.append(LogicalModel(name=name, bindings=bindings))
     return models
+
+
+def _normalize_bindings(value, name: str) -> list[ModelBinding]:
+    """Normalize a models.yaml value into ordered bindings.
+
+    ``name`` is the public model name, used as the default ``upstream``.
+    """
+    out: list[ModelBinding] = []
+    if isinstance(value, str):
+        if value:
+            out.append(ModelBinding(provider=value, upstream=name))
+    elif isinstance(value, dict):
+        # Bare {provider: upstream} for a single-provider alias.
+        for prov, up in value.items():
+            out.extend(_bindings_from_upstream(prov, up, name))
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, str):
+                if item:
+                    out.append(ModelBinding(provider=item, upstream=name))
+            elif isinstance(item, dict):
+                for prov, up in item.items():
+                    out.extend(_bindings_from_upstream(prov, up, name))
+    return out
+
+
+def _bindings_from_upstream(provider: str, upstream, name: str) -> list[ModelBinding]:
+    """Expand one provider's upstream (str or list) into bindings."""
+    if not provider:
+        return []
+    if isinstance(upstream, list):
+        return [
+            ModelBinding(provider=provider, upstream=u or name)
+            for u in upstream
+            if isinstance(u, str)
+        ]
+    return [ModelBinding(provider=provider, upstream=upstream or name)]

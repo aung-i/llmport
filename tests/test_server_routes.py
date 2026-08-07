@@ -23,8 +23,7 @@ _BASE_PROVIDERS = {
     "gateway": {"host": "127.0.0.1", "port": 11434},
     "providers": [
         {
-            "id": "test-p",
-            "name": "Test",
+            "name": "test-p",
             "protocol": "openai",
             "base_url": "https://api.example.com",
             "api_key": "sk-test",
@@ -32,9 +31,7 @@ _BASE_PROVIDERS = {
     ],
 }
 
-_BASE_MODELS = {"models": [
-    {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
-]}
+_BASE_MODELS = {"models": {"gpt5": {"test-p": "gpt-5"}}}
 
 
 def _make_app(tmp: str):

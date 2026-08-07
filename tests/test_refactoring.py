@@ -239,32 +239,3 @@ class TestIssue7ParseModelsMigration:
         assert "from llmport.models.parser import parse_models" in src
 
 
-# ──────────────────────────────────────────────
-# Issue 6: routing_strategy docstring
-# ──────────────────────────────────────────────
-
-class TestIssue6RoutingStrategyDocstring:
-
-    def test_routing_strategy_has_documentation(self):
-        """The ``routing_strategy`` field must be documented, either via
-        dataclass field metadata or in the class/module docstring."""
-        from llmport.models.model import LogicalModel
-
-        # Check 1: field-level metadata doc
-        f_field = LogicalModel.__dataclass_fields__.get("routing_strategy")
-        if f_field is None:
-            raise AssertionError("routing_strategy field not found on LogicalModel")
-
-        meta_doc = f_field.metadata.get("doc", "")
-        if meta_doc.strip():
-            return  # documented via metadata
-
-        # Check 2: class docstring mentions the field
-        class_doc = (LogicalModel.__doc__ or "")
-        if "routing_strategy" in class_doc:
-            return  # documented in class-level docstring
-
-        raise AssertionError(
-            "routing_strategy field must be documented via field metadata "
-            "or class docstring"
-        )

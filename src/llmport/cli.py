@@ -25,7 +25,7 @@ _DEFAULT_PROVIDERS = {
     "providers": [],
 }
 
-_DEFAULT_MODELS = {"models": []}
+_DEFAULT_MODELS = {"models": {}}
 
 # ============================================================================
 # Typer app & command wiring
@@ -128,8 +128,7 @@ def _cli_status() -> None:
 
 @provider_app.command("add")
 def _cli_provider_add(
-    id: str = typer.Option(..., "--id", help="供应商 ID，如 anthropic"),
-    name: str | None = typer.Option(None, "--name", help="显示名称（默认同 id）"),
+    name: str = typer.Option(..., "--name", help="供应商标识(模型映射里用此名引用),如 anthropic"),
     protocol: Literal["openai", "anthropic"] = typer.Option(
         "openai", "--protocol", help="openai | anthropic"),
     base_url: str | None = typer.Option(None, "--base-url", help="留空则按 protocol 取默认"),
@@ -137,7 +136,7 @@ def _cli_provider_add(
         None, "--api-key",
         help="API key；不传时：新增供应商则交互输入（不回显），更新供应商则保留原 key"),
 ) -> None:
-    _provider_add(DaemonManager(), id=id, name=name, protocol=protocol,
+    _provider_add(DaemonManager(), name=name, protocol=protocol,
                   base_url=base_url, api_key=api_key)
 
 
@@ -147,13 +146,13 @@ def _cli_provider_list() -> None:
 
 
 @provider_app.command("remove")
-def _cli_provider_remove(id: str = typer.Argument(..., help="供应商 ID")) -> None:
-    _provider_remove(DaemonManager(), id)
+def _cli_provider_remove(name: str = typer.Argument(..., help="供应商 name")) -> None:
+    _provider_remove(DaemonManager(), name)
 
 
 @provider_app.command("test")
-def _cli_provider_test(id: str = typer.Argument(..., help="供应商 ID")) -> None:
-    _provider_test(DaemonManager(), id)
+def _cli_provider_test(name: str = typer.Argument(..., help="供应商 name")) -> None:
+    _provider_test(DaemonManager(), name)
 
 
 # --- model commands --------------------------------------------------------
@@ -162,7 +161,7 @@ def _cli_provider_test(id: str = typer.Argument(..., help="供应商 ID")) -> No
 @model_app.command("add")
 def _cli_model_add(
     name: str = typer.Option(..., "--name", help="公开名（客户端请求时填的 model）"),
-    provider: str = typer.Option(..., "--provider", help="供应商 ID"),
+    provider: str = typer.Option(..., "--provider", help="供应商 name"),
     upstream: str | None = typer.Option(None, "--upstream", help="供应商的真实模型名（默认同 name）"),
 ) -> None:
     _model_add(DaemonManager(), name=name, provider=provider, upstream=upstream)
@@ -231,7 +230,7 @@ def _cmd_setup(dm: DaemonManager) -> None:
     print(f"  models.yaml     模型映射 (公开名 -> 供应商模型, 0600)")
     print()
     print("下一步:")
-    print("  llmport provider add --id anthropic --protocol anthropic   # 加供应商")
+    print("  llmport provider add --name anthropic --protocol anthropic   # 加供应商")
     print("  llmport model add --name claude-sonnet --provider anthropic  # 加模型映射")
     print("  llmport start                                                # 启动网关")
     print()
@@ -244,7 +243,7 @@ def _cmd_setup(dm: DaemonManager) -> None:
 
 
 def _provider_add(
-    dm: DaemonManager, *, id: str, name: str | None, protocol: str,
+    dm: DaemonManager, *, name: str, protocol: str,
     base_url: str | None, api_key: str | None,
 ) -> None:
     """Add or update a provider (base_url + api_key together in providers.yaml).
@@ -258,8 +257,7 @@ def _provider_add(
     pdata = _safe_load_providers(store) or dict(_DEFAULT_PROVIDERS)
     providers = pdata.get("providers", [])
 
-    pid = id
-    existing = next((p for p in providers if p["id"] == pid), None)
+    existing = next((p for p in providers if p.get("name") == name), None)
 
     if not base_url:
         # Host root only; /v1 is added by the path constants on forward.
@@ -289,54 +287,53 @@ def _provider_add(
         else:
             api_key = existing.get("api_key", "")  # keep existing key on update
 
-    name = name or pid
-    entry = {"id": pid, "name": name, "protocol": protocol, "base_url": base_url}
+    entry = {"name": name, "protocol": protocol, "base_url": base_url}
     if api_key:
         entry["api_key"] = api_key
-    providers = [p for p in providers if p["id"] != pid] + [entry]
+    providers = [p for p in providers if p.get("name") != name] + [entry]
 
     pdata["providers"] = providers
     store.save_providers_config(pdata)
 
     if existing is None:
-        print(f"已添加供应商 {pid} (API key {'已存储' if api_key else '未设置'})")
+        print(f"已添加供应商 {name} (API key {'已存储' if api_key else '未设置'})")
     else:
         if raw_api_key:
-            print(f"已更新供应商 {pid} (API key 已更新)")
+            print(f"已更新供应商 {name} (API key 已更新)")
         else:
-            print(f"已更新供应商 {pid} (API key 保留原值)")
+            print(f"已更新供应商 {name} (API key 保留原值)")
     _apply_if_running(dm)
 
 
 def _provider_list(dm: DaemonManager) -> None:
     pdata = _safe_load_providers(dm.store)
     if not pdata or not pdata.get("providers"):
-        print("无供应商。运行 `llmport provider add --id <id>` 添加。")
+        print("无供应商。运行 `llmport provider add --name <name>` 添加。")
         return
-    print(f"{'ID':<16} {'协议':<10} {'base_url':<34} 名称")
+    print(f"{'名称':<16} {'协议':<10} {'base_url':<34}")
     for p in pdata["providers"]:
-        print(f"{p['id']:<16} {p['protocol']:<10} {p['base_url']:<34} {p.get('name', '')}")
+        print(f"{p.get('name', ''):<16} {p.get('protocol', ''):<10} {p.get('base_url', ''):<34}")
 
 
-def _provider_remove(dm: DaemonManager, pid: str) -> None:
+def _provider_remove(dm: DaemonManager, name: str) -> None:
     store = dm.store
     pdata = _safe_load_providers(store)
     if not pdata:
         print("无配置文件。")
         return
     providers = pdata.get("providers", [])
-    new = [p for p in providers if p["id"] != pid]
+    new = [p for p in providers if p.get("name") != name]
     if len(new) == len(providers):
-        print(f"未找到供应商 {pid}。")
+        print(f"未找到供应商 {name}。")
         return
     pdata["providers"] = new
     # The api_key lives inside the provider entry, so it is removed with it.
     store.save_providers_config(pdata)
-    print(f"已删除供应商 {pid}（及其 key）。")
+    print(f"已删除供应商 {name}（及其 key）。")
     _apply_if_running(dm)
 
 
-def _provider_test(dm: DaemonManager, pid: str) -> None:
+def _provider_test(dm: DaemonManager, name: str) -> None:
     """Test a configured provider's connection directly from disk.
 
     No daemon required: reads providers.yaml (which holds the api_key
@@ -353,26 +350,25 @@ def _provider_test(dm: DaemonManager, pid: str) -> None:
         print("无配置文件。运行 `llmport config init` 或 `llmport provider add`。")
         return
     providers = pdata.get("providers", [])
-    entry = next((p for p in providers if p.get("id") == pid), None)
+    entry = next((p for p in providers if p.get("name") == name), None)
     if not entry:
-        ids = ", ".join(p.get("id", "") for p in providers) or "（无）"
-        print(f"未找到供应商 {pid}。已配置: {ids}")
+        names = ", ".join(p.get("name", "") for p in providers) or "（无）"
+        print(f"未找到供应商 {name}。已配置: {names}")
         return
     api_key = entry.get("api_key", "")
     if not api_key:
-        print(f"供应商 {pid} 未设置 API key。")
-        print(f"运行 `llmport provider add --id {pid} --api-key <key>` 补上。")
+        print(f"供应商 {name} 未设置 API key。")
+        print(f"运行 `llmport provider add --name {name} --api-key <key>` 补上。")
         return
 
     from llmport.models.provider import ProviderConfig
     provider = ProviderConfig(
-        id=pid,
-        name=entry.get("name", pid),
+        name=name,
         protocol=entry.get("protocol", "openai"),
         base_url=entry.get("base_url", ""),
         api_key=api_key,
     )
-    print(f"测试 {pid} ({provider.protocol}, {provider.base_url}) ...")
+    print(f"测试 {name} ({provider.protocol}, {provider.base_url}) ...")
     result = asyncio.run(_provider_test_async(provider))
     if result["ok"]:
         print(f"✓ 连通 ({result['latency_ms']:.0f}ms)")
@@ -418,20 +414,25 @@ def _model_add(
     _ensure_store_init(store)
 
     pdata = _safe_load_providers(store) or dict(_DEFAULT_PROVIDERS)
-    provider_ids = [p["id"] for p in pdata.get("providers", [])]
-    if provider not in provider_ids:
-        print(f"未知供应商 {provider}。先运行: llmport provider add --id {provider}")
+    provider_names = [p.get("name") for p in pdata.get("providers", [])]
+    if provider not in provider_names:
+        print(f"未知供应商 {provider}。先运行: llmport provider add --name {provider}")
         return
 
-    upstream = upstream or name
     mdata = _safe_load_models(store) or dict(_DEFAULT_MODELS)
-    models = mdata.get("models", [])
-    existed = any(m.get("name") == name for m in models)
-    models = [m for m in models if m.get("name") != name]
-    models.append({"name": name, "provider": provider, "upstream": upstream})
+    models = mdata.setdefault("models", {})
+    if not isinstance(models, dict):
+        models = {}
+    existed = name in models
+    # 无别名(upstream 缺省或同 name): name -> provider (str)
+    # 有别名: name -> {provider: upstream} (dict)
+    if upstream and upstream != name:
+        models[name] = {provider: upstream}
+    else:
+        models[name] = provider
     mdata["models"] = models
     store.save_models_config(mdata)
-    print(f"{'已更新' if existed else '已添加'}模型 {name} -> {provider}/{upstream}")
+    print(f"{'已更新' if existed else '已添加'}模型 {name} -> {provider}/{upstream or name}")
     _apply_if_running(dm)
 
 
@@ -440,14 +441,11 @@ def _model_list(dm: DaemonManager) -> None:
     if not mdata or not mdata.get("models"):
         print("无模型。运行 `llmport model add --name <n> --provider <p>` 添加。")
         return
+    from llmport.models.model import parse_models_config
     print(f"{'公开名':<20} {'供应商':<14} {'upstream':<24}")
-    for m in mdata["models"]:
-        bindings = m.get("bindings")
-        if bindings:
-            for b in bindings:
-                print(f"{m['name']:<20} {b['provider']:<14} {b['upstream']:<24}")
-        else:
-            print(f"{m['name']:<20} {m.get('provider', ''):<14} {m.get('upstream', ''):<24}")
+    for m in parse_models_config(mdata.get("models")):
+        for b in m.bindings:
+            print(f"{m.name:<20} {b.provider:<14} {b.upstream:<24}")
 
 
 def _model_remove(dm: DaemonManager, name: str) -> None:
@@ -456,12 +454,12 @@ def _model_remove(dm: DaemonManager, name: str) -> None:
     if not mdata:
         print("无配置文件。")
         return
-    models = mdata.get("models", [])
-    new = [m for m in models if m.get("name") != name]
-    if len(new) == len(models):
+    models = mdata.get("models", {})
+    if not isinstance(models, dict) or name not in models:
         print(f"未找到模型 {name}。")
         return
-    mdata["models"] = new
+    del models[name]
+    mdata["models"] = models
     store.save_models_config(mdata)
     print(f"已删除模型 {name}。")
     _apply_if_running(dm)
@@ -519,9 +517,9 @@ def _config_show(dm: DaemonManager) -> None:
     print()
     print("# API key 状态:")
     for p in providers:
-        pid = p.get("id", "")
+        pname = p.get("name", "")
         status = "已设置" if p.get("api_key") else "未设置"
-        print(f"#   {pid}: {status}")
+        print(f"#   {pname}: {status}")
 
 
 def _config_edit(dm: DaemonManager, target: str = "providers") -> None:
@@ -544,7 +542,7 @@ def _cmd_start(dm: DaemonManager, host: str | None = None, port: int | None = No
     # Refuse to start with no providers configured.
     pdata = _safe_load_providers(dm.store)
     if not pdata or not pdata.get("providers"):
-        print("尚未配置供应商。请先运行: llmport provider add --id <id>")
+        print("尚未配置供应商。请先运行: llmport provider add --name <name>")
         return
     for w in _validate_providers_config(pdata):
         print(f"警告: {w}")
@@ -621,7 +619,7 @@ def _cmd_status(dm: DaemonManager) -> None:
         print(f"  Providers ({len(providers)}):")
         for p in providers:
             latency = p.get("latency_ms", 0) or 0
-            print(f"    {p['id']:<16} {p['status']:<10} {latency:.0f}ms")
+            print(f"    {p['name']:<16} {p['status']:<10} {latency:.0f}ms")
 
 
 # ============================================================================
@@ -713,16 +711,16 @@ def _validate_providers_config(pdata) -> list[str]:
 
     warnings: list[str] = []
     for p in pdata.get("providers", []):
-        if not p.get("id"):
-            warnings.append("供应商条目缺少 id 字段，将被忽略")
+        if not p.get("name"):
+            warnings.append("供应商条目缺少 name 字段，将被忽略")
         elif not p.get("base_url"):
-            warnings.append(f"供应商 {p['id']} 缺少 base_url，无法转发")
+            warnings.append(f"供应商 {p['name']} 缺少 base_url，无法转发")
         else:
             try:
                 validate_provider_base_url(p["base_url"], gw_host, gw_port)
             except ValueError as e:
                 warnings.append(
-                    f"供应商 {p['id']} 的 base_url 被拒绝（运行时跳过）: {e}")
+                    f"供应商 {p['name']} 的 base_url 被拒绝（运行时跳过）: {e}")
     return warnings
 
 
@@ -736,14 +734,15 @@ def _validate_models_config(mdata) -> list[str]:
         return []
     from llmport.models.model import parse_models_config
 
-    parsed_names = {m.name for m in parse_models_config(mdata.get("models", []))}
+    models = mdata.get("models", {})
+    parsed_names = {m.name for m in parse_models_config(models)}
     warnings: list[str] = []
-    for m in mdata.get("models", []):
-        name = m.get("name") or m.get("id")
-        if name and name not in parsed_names:
-            warnings.append(
-                f"模型 {name} 的 binding 缺字段（provider/upstream），将被忽略"
-            )
+    if isinstance(models, dict):
+        for name in models:
+            if name not in parsed_names:
+                warnings.append(
+                    f"模型 {name} 的 binding 缺字段（provider），将被忽略"
+                )
     return warnings
 
 

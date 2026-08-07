@@ -16,17 +16,14 @@ def test_full_flow():
         # Add a provider (api_key lives in providers.yaml alongside base_url)
         pdata = store.load_providers_config()
         pdata["providers"].append({
-            "id": "test-provider",
-            "name": "Test",
+            "name": "test-provider",
             "protocol": "openai",
             "base_url": "https://httpbin.org",
             "api_key": "sk-test",
         })
         store.save_providers_config(pdata)
-        store.save_models_config({"models": [
-            {"name": "test-model", "provider": "test-provider",
-             "upstream": "test-model-real"},
-        ]})
+        store.save_models_config({"models": {
+            "test-model": {"test-provider": "test-model-real"}}})
 
         # Single app serves both protocol routes and control API
         app = create_app(store)
@@ -53,16 +50,13 @@ def test_protocol_mismatch_error():
         store.init_first_run()
         pdata = store.load_providers_config()
         pdata["providers"].append({
-            "id": "ant",
-            "name": "Anthropic",
+            "name": "ant",
             "protocol": "anthropic",
             "base_url": "https://api.anthropic.com",
             "api_key": "sk-ant-test",
         })
         store.save_providers_config(pdata)
-        store.save_models_config({"models": [
-            {"name": "claude", "provider": "ant", "upstream": "claude-real"},
-        ]})
+        store.save_models_config({"models": {"claude": {"ant": "claude-real"}}})
         app = create_app(store)
         client = TestClient(app)
 
@@ -161,7 +155,7 @@ def test_first_run_detection_with_empty_providers():
         assert pdata.get("providers") == []
 
         # Add a provider and verify detection works
-        pdata["providers"].append({"id": "test", "name": "Test"})
+        pdata["providers"].append({"name": "test"})
         store.save_providers_config(pdata)
         pdata = store.load_providers_config()
         assert len(pdata["providers"]) == 1

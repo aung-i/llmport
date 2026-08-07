@@ -15,7 +15,6 @@ from llmport.models.provider import ProviderConfig
 @pytest.fixture
 def provider() -> ProviderConfig:
     p = ProviderConfig(
-        id="anthropic",
         name="Anthropic",
         protocol="anthropic",
         base_url="https://api.anthropic.com",
@@ -132,7 +131,6 @@ async def test_test_connection_fallback_model(provider):
     from llmport.gateway.anthropic_handler import test_connection
 
     empty_provider = ProviderConfig(
-        id="anthropic",
         name="Anthropic",
         protocol="anthropic",
         base_url="https://api.anthropic.com",

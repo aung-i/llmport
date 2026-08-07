@@ -20,7 +20,6 @@ from llmport.models.provider import ProviderConfig
 @pytest.fixture
 def provider() -> ProviderConfig:
     return ProviderConfig(
-        id="test",
         name="Test",
         protocol="openai",
         base_url="https://api.example.com",

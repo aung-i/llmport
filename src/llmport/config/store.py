@@ -31,18 +31,17 @@ _PROVIDERS_TEMPLATE = """\
 #   也可用 `llmport start --host/--port` 覆盖(优先级: CLI > 此文件 > 默认)。
 #
 # providers: 供应商连接信息 + API key,自包含。
+#   name: 供应商标识(模型映射里用此名引用),如 anthropic
 #   protocol: openai | anthropic
 #   base_url 填主机根即可,/v1 由网关自动补。
 #   api_key 明文存储;用 `llmport provider add` 交互输入(不回显)更省事。
 #
 # providers: []   # 下面是示例,去掉行首 # 启用
-#   - id: anthropic
-#     name: Anthropic
+#   - name: anthropic
 #     protocol: anthropic
 #     base_url: https://api.anthropic.com
 #     api_key: sk-ant-xxxxx
-#   - id: openai
-#     name: OpenAI
+#   - name: openai
 #     protocol: openai
 #     base_url: https://api.openai.com
 #     api_key: sk-xxxxx
@@ -56,21 +55,23 @@ providers: []
 
 # First-run models.yaml template.
 _MODELS_TEMPLATE = """\
-# llmport 模型映射 (公开名 -> 供应商真实模型名)
+# llmport 模型映射 (公开名 -> 供应商)
 # 改完重启生效: llmport restart
 #
-# 客户端请求时填的 model 名,映射到供应商的真实模型名。
-# 简写(单供应商):
-#   - name: claude-sonnet
-#     provider: anthropic
-#     upstream: claude-sonnet-4
-# 完整形式(多供应商 fallback,priority 小的优先):
-#   - name: gpt-4o
-#     bindings:
-#       - {provider: openai, upstream: gpt-4o, priority: 1}
-#       - {provider: azure, upstream: gpt4o-deploy, priority: 2}
+# key 是客户端请求时填的 model 名,映射到供应商。
+# upstream 缺省 = 公开名;多供应商/多 upstream 按顺序 fallback。
+#
+#   claude-sonnet: anthropic                 # 无别名单供应商
+#   gpt-4o:                                   # 无别名多供应商(顺序=优先级)
+#     - openai
+#     - azure
+#   sonnet:                                   # 有别名,供应商后接单个模型名
+#     - anthropic: claude-sonnet-4
+#   gpt4:                                     # 供应商后接列表(依次 fallback)
+#     - openai: gpt-4
+#     - azure: [gpt4o-deploy, gpt4o-turbo]
 
-models: []
+models: {}
 """
 
 # Files from the old single-file layout; deleted on init since the new code
@@ -139,7 +140,7 @@ class ConfigStore:
             if config_template:
                 self.write_models_template()
             else:
-                self.save_models_config({"models": []})
+                self.save_models_config({"models": {}})
 
         self._cleanup_legacy_files()
 
@@ -205,7 +206,7 @@ class ConfigStore:
     # ------------------------------------------------------------------
 
     def load_models_config(self) -> dict:
-        """Load and return the models config (``{models: [...]}``).
+        """Load and return the models config (``{models: {...}}``).
 
         Returns ``{}`` if the file does not exist yet (models are optional at
         first run). Raises ``ValueError`` if it is valid YAML but not a

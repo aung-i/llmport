@@ -27,7 +27,7 @@ def test_init_first_run_creates_both_files():
         assert pdata["providers"] == []
 
         mdata = store.load_models_config()
-        assert mdata == {"models": []}
+        assert mdata == {"models": {}}
 
 
 def test_init_first_run_deletes_legacy_files():
@@ -57,7 +57,7 @@ def test_load_providers_config_rejects_non_dict_top_level():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.dir.mkdir(parents=True, exist_ok=True)
-        store.providers_path.write_text("- id: anthropic\n  base_url: x\n")  # list
+        store.providers_path.write_text("- name: anthropic\n  base_url: x\n")  # list
         with pytest.raises(ValueError):
             store.load_providers_config()
 
@@ -77,8 +77,7 @@ def test_save_and_load_preserves_providers_with_key():
         store.init_first_run()
         pdata = store.load_providers_config()
         pdata["providers"].append({
-            "id": "test",
-            "name": "Test",
+            "name": "test",
             "protocol": "openai",
             "base_url": "https://api.example.com",
             "api_key": "sk-secret",
@@ -88,7 +87,7 @@ def test_save_and_load_preserves_providers_with_key():
         loaded = store.load_providers_config()
         assert len(loaded["providers"]) == 1
         p = loaded["providers"][0]
-        assert p["id"] == "test"
+        assert p["name"] == "test"
         assert p["base_url"] == "https://api.example.com"
         assert p["api_key"] == "sk-secret"
 
@@ -100,15 +99,13 @@ def test_api_key_lives_in_providers_yaml_not_models():
         store.init_first_run()
         pdata = store.load_providers_config()
         pdata["providers"].append({
-            "id": "test",
-            "name": "Test",
+            "name": "test",
             "protocol": "openai",
             "base_url": "https://api.example.com",
             "api_key": "sk-secret",
         })
         store.save_providers_config(pdata)
-        store.save_models_config({"models": [
-            {"name": "my-model", "provider": "test", "upstream": "gpt-4"}]})
+        store.save_models_config({"models": {"my-model": {"test": "gpt-4"}}})
 
         providers_text = Path(tmp, "providers.yaml").read_text(encoding="utf-8")
         models_text = Path(tmp, "models.yaml").read_text(encoding="utf-8")
@@ -122,8 +119,7 @@ def test_models_config_independent_of_providers():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        store.save_models_config({"models": [
-            {"name": "gpt-4o", "provider": "openai", "upstream": "gpt-4o"}]})
+        store.save_models_config({"models": {"gpt-4o": "openai"}})
         assert len(store.load_models_config()["models"]) == 1
         # providers.yaml untouched (still empty).
         assert store.load_providers_config()["providers"] == []
@@ -169,7 +165,7 @@ def test_stray_legacy_config_enc_is_ignored():
         assert Path(tmp, "config.enc").exists()  # left in place, not deleted
 
         assert store.load_providers_config()["providers"] == []
-        assert store.load_models_config() == {"models": []}
+        assert store.load_models_config() == {"models": {}}
 
 
 def test_write_providers_template_contains_examples():

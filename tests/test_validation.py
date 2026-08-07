@@ -99,7 +99,7 @@ def test_rejects_malformed_urls(url):
 def test_validate_providers_config_passes_clean_providers():
     validate_providers_config({
         "gateway": {"host": "127.0.0.1", "port": 11434},
-        "providers": [{"id": "p", "base_url": "https://api.openai.com"}],
+        "providers": [{"name": "p", "base_url": "https://api.openai.com"}],
     })  # no raise
 
 
@@ -108,7 +108,7 @@ def test_validate_providers_config_rejects_bad_provider():
         validate_providers_config({
             "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [
-                {"id": "p", "base_url": "http://169.254.169.254"},
+                {"name": "p", "base_url": "http://169.254.169.254"},
             ],
         })
 
@@ -118,7 +118,7 @@ def test_validate_providers_config_rejects_self_loop_provider():
         validate_providers_config({
             "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [
-                {"id": "p", "base_url": "http://127.0.0.1:11434"},
+                {"name": "p", "base_url": "http://127.0.0.1:11434"},
             ],
         })
 
@@ -131,7 +131,7 @@ def test_validate_providers_config_noop_on_non_dict_or_empty():
 
 def test_validate_providers_config_skips_provider_without_base_url():
     """A provider missing base_url is skipped (not a validation error here)."""
-    validate_providers_config({"providers": [{"id": "p"}]})  # no raise
+    validate_providers_config({"providers": [{"name": "p"}]})  # no raise
 
 
 def test_validate_providers_config_skips_non_dict_provider():
@@ -158,7 +158,7 @@ def test_save_providers_config_rejects_metadata_base_url(tmp_path):
         store.save_providers_config({
             "version": 1,
             "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [{"id": "p", "base_url": "http://169.254.169.254"}],
+            "providers": [{"name": "p", "base_url": "http://169.254.169.254"}],
         })
 
 
@@ -169,6 +169,6 @@ def test_save_providers_config_allows_local_base_url(tmp_path):
     store.save_providers_config({
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
-        "providers": [{"id": "p", "base_url": "http://127.0.0.1:11435"}],
+        "providers": [{"name": "p", "base_url": "http://127.0.0.1:11435"}],
     })  # no raise
 

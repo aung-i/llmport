@@ -6,7 +6,6 @@ from llmport.models.provider import ProviderConfig
 
 def make_provider(id: str = "test") -> ProviderConfig:
     return ProviderConfig(
-        id=id,
         name=id.title(),
         protocol="openai",
         base_url="https://api.example.com",

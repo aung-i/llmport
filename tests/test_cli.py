@@ -166,11 +166,10 @@ class TestStartGate:
         store.save_providers_config({
             "version": 1,
             "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [{"id": "p", "name": "P", "protocol": "openai",
+            "providers": [{"name": "p", "protocol": "openai",
                            "base_url": "https://api.example.com", "api_key": "sk"}],
         })
-        store.save_models_config({"models": [
-            {"name": "m", "provider": "p", "upstream": "m"}]})
+        store.save_models_config({"models": {"m": "p"}})
         with patch("llmport.cli.DaemonManager") as MockDM:
             mock_dm = MockDM.return_value
             mock_dm.is_running.return_value = False
@@ -182,21 +181,21 @@ class TestStartGate:
 
     def test_validate_config_warns_on_malformed_entries(self):
         """_validate_providers_config / _validate_models_config surface missing
-        id/base_url and dropped models."""
+        name/base_url and dropped models."""
         from llmport.cli import _validate_providers_config, _validate_models_config
         pdata = {
             "providers": [
-                {"id": "p", "base_url": "https://api.openai.com/v1"},
-                {"name": "no-id"},            # missing id
-                {"id": "p3"},                 # missing base_url
+                {"name": "p", "base_url": "https://api.openai.com/v1"},
+                {"id": "no-name"},            # missing name
+                {"name": "p3"},               # missing base_url
             ],
         }
-        mdata = {"models": [
-            {"name": "good", "provider": "p", "upstream": "u"},
-            {"name": "bad", "bindings": [{"provider": "p"}]},  # missing upstream
-        ]}
+        mdata = {"models": {
+            "good": {"p": "u"},              # valid binding
+            "bad": {},                        # no provider -> ignored
+        }}
         warnings = _validate_providers_config(pdata) + _validate_models_config(mdata)
-        assert any("缺少 id" in w for w in warnings)
+        assert any("缺少 name" in w for w in warnings)
         assert any("p3" in w and "base_url" in w for w in warnings)
         assert any("bad" in w for w in warnings)
         assert not any("good" in w for w in warnings)
@@ -214,12 +213,12 @@ class TestProviderModelCommands:
         """provider add stores the key inline in providers.yaml (self-contained)."""
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "anthropic",
+        invoke(["llmport", "provider", "add", "--name", "anthropic",
                 "--protocol", "anthropic", "--api-key", "sk-xyz"],
                tmp_path, monkeypatch)
         store = ConfigStore(str(tmp_path / "llmport"))
         pdata = store.load_providers_config()
-        p = next(p for p in pdata["providers"] if p["id"] == "anthropic")
+        p = next(p for p in pdata["providers"] if p["name"] == "anthropic")
         assert p["api_key"] == "sk-xyz"
         # No separate secrets file in the new layout.
         assert not (tmp_path / "llmport" / "secrets.yaml").exists()
@@ -229,7 +228,7 @@ class TestProviderModelCommands:
         from llmport.config.store import ConfigStore
 
         monkeypatch.setattr("getpass.getpass", lambda _p: "sk-prompted")
-        invoke(["llmport", "provider", "add", "--id", "openai",
+        invoke(["llmport", "provider", "add", "--name", "openai",
                 "--protocol", "openai"], tmp_path, monkeypatch)
         store = ConfigStore(str(tmp_path / "llmport"))
         p = store.load_providers_config()["providers"][0]
@@ -240,7 +239,7 @@ class TestProviderModelCommands:
         assert "无供应商" in result.stdout
 
     def test_provider_list_shows_added(self, tmp_path, monkeypatch):
-        invoke(["llmport", "provider", "add", "--id", "anthropic",
+        invoke(["llmport", "provider", "add", "--name", "anthropic",
                 "--protocol", "anthropic", "--api-key", "sk"],
                tmp_path, monkeypatch)
         result = invoke(["llmport", "provider", "list"], tmp_path, monkeypatch)
@@ -249,7 +248,7 @@ class TestProviderModelCommands:
     def test_provider_remove_clears_key(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "p",
+        invoke(["llmport", "provider", "add", "--name", "p",
                 "--protocol", "openai", "--api-key", "sk"], tmp_path, monkeypatch)
         invoke(["llmport", "provider", "remove", "p"], tmp_path, monkeypatch)
         store = ConfigStore(str(tmp_path / "llmport"))
@@ -260,10 +259,10 @@ class TestProviderModelCommands:
         """Updating a provider without --api-key keeps the existing key (no prompt)."""
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "p",
+        invoke(["llmport", "provider", "add", "--name", "p",
                 "--protocol", "openai", "--api-key", "sk-orig"], tmp_path, monkeypatch)
         # Update base_url without --api-key: must not prompt, must keep key.
-        result = invoke(["llmport", "provider", "add", "--id", "p",
+        result = invoke(["llmport", "provider", "add", "--name", "p",
                          "--protocol", "openai", "--base-url", "https://api.example.com"],
                         tmp_path, monkeypatch)
         assert "保留原值" in result.stdout
@@ -276,9 +275,9 @@ class TestProviderModelCommands:
         """Updating with --api-key replaces the key."""
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "p",
+        invoke(["llmport", "provider", "add", "--name", "p",
                 "--protocol", "openai", "--api-key", "sk-old"], tmp_path, monkeypatch)
-        result = invoke(["llmport", "provider", "add", "--id", "p",
+        result = invoke(["llmport", "provider", "add", "--name", "p",
                          "--protocol", "openai", "--api-key", "sk-new"],
                         tmp_path, monkeypatch)
         assert "已更新" in result.stdout
@@ -293,7 +292,7 @@ class TestProviderModelCommands:
     def test_model_add_list_remove(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "p",
+        invoke(["llmport", "provider", "add", "--name", "p",
                 "--protocol", "openai", "--api-key", "sk"], tmp_path, monkeypatch)
         invoke(["llmport", "model", "add", "--name", "m",
                 "--provider", "p", "--upstream", "m-real"], tmp_path, monkeypatch)
@@ -301,17 +300,16 @@ class TestProviderModelCommands:
         assert "m-real" in result.stdout
 
         store = ConfigStore(str(tmp_path / "llmport"))
-        assert any(m["name"] == "m" for m in store.load_models_config()["models"])
+        assert "m" in store.load_models_config()["models"]
 
         invoke(["llmport", "model", "remove", "m"], tmp_path, monkeypatch)
-        assert not any(m["name"] == "m"
-                       for m in store.load_models_config()["models"])
+        assert "m" not in store.load_models_config()["models"]
 
     def test_openai_default_base_url_has_no_v1(self, tmp_path, monkeypatch):
         """OpenAI default base_url is the host root; /v1 is added by path constants."""
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "o",
+        invoke(["llmport", "provider", "add", "--name", "o",
                 "--protocol", "openai", "--api-key", "sk"], tmp_path, monkeypatch)
         base = ConfigStore(str(tmp_path / "llmport")).load_providers_config()["providers"][0]["base_url"]
         assert base == "https://api.openai.com"
@@ -319,7 +317,7 @@ class TestProviderModelCommands:
     def test_anthropic_default_base_url(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        invoke(["llmport", "provider", "add", "--id", "a",
+        invoke(["llmport", "provider", "add", "--name", "a",
                 "--protocol", "anthropic", "--api-key", "sk"], tmp_path, monkeypatch)
         base = ConfigStore(str(tmp_path / "llmport")).load_providers_config()["providers"][0]["base_url"]
         assert base == "https://api.anthropic.com"
@@ -362,7 +360,7 @@ class TestConfigCommands:
         assert "models.yaml" in result.stdout
 
     def test_show_prints_content_and_key_status(self, tmp_path, monkeypatch):
-        invoke(["llmport", "provider", "add", "--id", "p",
+        invoke(["llmport", "provider", "add", "--name", "p",
                 "--protocol", "openai", "--api-key", "sk"], tmp_path, monkeypatch)
         result = invoke(["llmport", "config", "show"], tmp_path, monkeypatch)
         assert "p" in result.stdout
@@ -395,10 +393,10 @@ class TestConfigCommands:
 
 
 class TestProviderTestCommand:
-    """`llmport provider test <id>` -- daemon-independent connectivity test."""
+    """`llmport provider test <name>` -- daemon-independent connectivity test."""
 
     def _add(self, tmp_path, monkeypatch, pid="p", protocol="openai", key="sk"):
-        invoke(["llmport", "provider", "add", "--id", pid,
+        invoke(["llmport", "provider", "add", "--name", pid,
                 "--protocol", protocol, "--api-key", key], tmp_path, monkeypatch)
 
     def test_openai_success_lists_models(self, tmp_path, monkeypatch):
@@ -472,41 +470,41 @@ class TestConfigValidationAndReload:
     def test_provider_add_rejects_metadata_base_url(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        result = invoke(["llmport", "provider", "add", "--id", "bad",
+        result = invoke(["llmport", "provider", "add", "--name", "bad",
                          "--protocol", "openai",
                          "--base-url", "http://169.254.169.254",
                          "--api-key", "sk"], tmp_path, monkeypatch)
         assert "拒绝保存" in result.stdout
         pdata = ConfigStore(str(tmp_path / "llmport")).load_providers_config()
-        assert not any(p.get("id") == "bad" for p in pdata.get("providers", []))
+        assert not any(p.get("name") == "bad" for p in pdata.get("providers", []))
 
     def test_provider_add_rejects_self_loop_base_url(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        result = invoke(["llmport", "provider", "add", "--id", "loop",
+        result = invoke(["llmport", "provider", "add", "--name", "loop",
                          "--protocol", "openai",
                          "--base-url", "http://127.0.0.1:11434",
                          "--api-key", "sk"], tmp_path, monkeypatch)
         assert "拒绝保存" in result.stdout
         pdata = ConfigStore(str(tmp_path / "llmport")).load_providers_config()
-        assert not any(p.get("id") == "loop" for p in pdata.get("providers", []))
+        assert not any(p.get("name") == "loop" for p in pdata.get("providers", []))
 
     def test_provider_add_allows_local_base_url(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore
 
-        result = invoke(["llmport", "provider", "add", "--id", "ollama",
+        result = invoke(["llmport", "provider", "add", "--name", "ollama",
                          "--protocol", "openai",
                          "--base-url", "http://127.0.0.1:11435",
                          "--api-key", "sk"], tmp_path, monkeypatch)
         assert "已添加" in result.stdout
         pdata = ConfigStore(str(tmp_path / "llmport")).load_providers_config()
-        assert any(p.get("id") == "ollama" for p in pdata["providers"])
+        assert any(p.get("name") == "ollama" for p in pdata["providers"])
 
     def test_validate_providers_config_warns_on_bad_base_url(self):
         from llmport.cli import _validate_providers_config
         pdata = {
             "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [{"id": "bad", "base_url": "http://169.254.169.254"}],
+            "providers": [{"name": "bad", "base_url": "http://169.254.169.254"}],
         }
         warnings = _validate_providers_config(pdata)
         assert any("bad" in w and "拒绝" in w for w in warnings)

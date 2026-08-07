@@ -19,19 +19,17 @@ from llmport.gateway.server import create_app
 
 
 def _make_app(tmp, provider_specs: list[tuple[str, str]]):
-    """Create an app with providers built from (id, protocol) specs.
+    """Create an app with providers built from (name, protocol) specs.
 
     A single logical model ``"m"`` is configured with bindings to every
-    provider in priority order, so the fallback chain visits them in
-    sequence (p1 priority 1, p2 priority 2, ...).
+    provider in list order, so the fallback chain visits them in sequence.
     """
     store = ConfigStore(tmp)
     store.init_first_run()
     pdata = store.load_providers_config()
     pdata["providers"] = [
         {
-            "id": pid,
-            "name": f"Provider {pid}",
+            "name": pid,
             "protocol": proto,
             "base_url": (
                 "https://api.example.com"
@@ -43,15 +41,9 @@ def _make_app(tmp, provider_specs: list[tuple[str, str]]):
         for pid, proto in provider_specs
     ]
     store.save_providers_config(pdata)
-    store.save_models_config({"models": [
-        {
-            "name": "m",
-            "bindings": [
-                {"provider": pid, "upstream": f"model-{pid}", "priority": i + 1}
-                for i, (pid, _) in enumerate(provider_specs)
-            ],
-        }
-    ]})
+    store.save_models_config({"models": {
+        "m": [{pid: f"model-{pid}"} for pid, _ in provider_specs],
+    }})
     return create_app(store)
 
 # ---------------------------------------------------------------------------
@@ -67,7 +59,7 @@ class TestStreamingFallbackLoop:
             client = TestClient(app)
 
             async def mock_stream(body, provider, model_name, path="/v1/chat/completions"):
-                if provider.id == "p1":
+                if provider.name == "p1":
                     yield b"data: [ERROR] p1 failed\n\n"
                 else:
                     yield b'data: {"id":"ok","choices":[{"delta":{"content":"Hello"}}]}\n\n'
@@ -96,10 +88,10 @@ class TestStreamingFallbackLoop:
             call_log = []
 
             async def mock_stream(body, provider, model_name, path="/v1/chat/completions"):
-                call_log.append(provider.id)
-                if provider.id in ("p1",):
+                call_log.append(provider.name)
+                if provider.name in ("p1",):
                     yield b"data: [ERROR] fail\n\n"
-                elif provider.id == "p3":
+                elif provider.name == "p3":
                     yield b'data: {"id":"ok","choices":[{"delta":{"content":"OK"}}]}\n\n'
                     yield b"data: [DONE]\n\n"
 
@@ -160,8 +152,8 @@ class TestNonStreamingFallbackLoop:
             call_log = []
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
-                call_log.append(provider.id)
-                if provider.id == "p1":
+                call_log.append(provider.name)
+                if provider.name == "p1":
                     return None, "p1 error"
                 return {"id": "ok", "choices": [], "usage": {"total_tokens": 5}}, None
 
@@ -184,10 +176,10 @@ class TestNonStreamingFallbackLoop:
             call_log = []
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
-                call_log.append(provider.id)
-                if provider.id == "p1":
+                call_log.append(provider.name)
+                if provider.name == "p1":
                     return None, "p1 error"
-                elif provider.id == "p3":
+                elif provider.name == "p3":
                     return {"id": "p3-result", "choices": [],
                             "usage": {"total_tokens": 7}}, None
 

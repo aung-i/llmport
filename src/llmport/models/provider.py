@@ -17,11 +17,12 @@ class ProviderConfig:
 
     Model routing lives in ``models.yaml``, not here. ``api_key`` is stored
     alongside ``base_url`` in ``providers.yaml`` (self-contained) and read
-    directly by ``from_dict`` -- there is no separate secrets vault.
+    directly by ``from_dict`` -- there is no separate secrets vault. ``name``
+    is the sole identity: it is both the slug referenced by model bindings
+    and the display name.
     """
 
-    id: str                        # unique slug, e.g. "anthropic"
-    name: str                      # display name, e.g. "Anthropic"
+    name: str                      # unique slug + display name, e.g. "anthropic"
     protocol: str                  # "openai" | "anthropic"
     base_url: str                  # e.g. "https://api.anthropic.com"
     api_key: str = ""              # plaintext in memory; plaintext in providers.yaml on disk
@@ -29,7 +30,6 @@ class ProviderConfig:
 
     def to_dict(self, include_key: bool = True) -> dict:
         result: dict = {
-            "id": self.id,
             "name": self.name,
             "protocol": self.protocol,
             "base_url": self.base_url,
@@ -52,10 +52,11 @@ class ProviderConfig:
                     setattr(health, k, raw_health[k])
         # Use .get() so a hand-edited config missing a field degrades to an
         # empty/default value instead of raising KeyError and crashing startup.
-        pid = d.get("id") or ""
+        # name is the sole identity; tolerate a hand-edited entry that still
+        # uses the legacy `id` key by falling back to it.
+        name = d.get("name") or d.get("id") or ""
         return cls(
-            id=pid,
-            name=d.get("name") or pid,
+            name=name,
             protocol=d.get("protocol") or "openai",
             base_url=d.get("base_url") or "",
             api_key=d.get("api_key", ""),

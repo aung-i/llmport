@@ -44,7 +44,7 @@ llmport                  # 打印帮助
 
 ```bash
 # 示例：加供应商（key 不回显，推荐不传 --api-key 交互输入）
-llmport provider add --id anthropic --protocol anthropic
+llmport provider add --name anthropic --protocol anthropic
 llmport provider test anthropic     # 验证连通，OpenAI 还会列出可用模型
 llmport model add --name claude-sonnet --provider anthropic --upstream claude-sonnet-4
 llmport start
@@ -56,7 +56,7 @@ llmport start
 
 ```
 providers.yaml   # 供应商 + gateway + API key（0600，自包含）
-models.yaml      # 模型映射：公开名 -> 供应商真实模型（0600）
+models.yaml      # 模型映射：公开名 -> 供应商（0600）
 ```
 
 `providers.yaml` 示例：
@@ -68,15 +68,14 @@ gateway:
   port: 11434
 
 # 供应商：base_url + API key 放一起，自包含。
+# name 是供应商标识（模型映射里用此名引用）。
 # base_url 填主机根即可，/v1 由网关自动补。
 providers:
-  - id: anthropic
-    name: Anthropic
+  - name: anthropic
     protocol: anthropic
     base_url: https://api.anthropic.com
     api_key: sk-ant-xxxxx
-  - id: openai
-    name: OpenAI
+  - name: openai
     protocol: openai
     base_url: https://api.openai.com
     api_key: sk-xxxxx
@@ -85,15 +84,17 @@ providers:
 `models.yaml` 示例：
 
 ```yaml
-# 公开名 -> 供应商的真实模型名
+# 公开名 -> 供应商。upstream 缺省 = 公开名；多供应商/多 upstream 按顺序 fallback。
 models:
-  - name: claude-sonnet          # 客户端请求时填的 model 名
-    provider: anthropic
-    upstream: claude-sonnet-4
-  - name: gpt-4o
-    bindings:                    # 多 binding = fallback 链
-      - {provider: openai, upstream: gpt-4o, priority: 1}
-      - {provider: azure, upstream: gpt4o-deploy, priority: 2}
+  claude-sonnet: anthropic                 # 无别名单供应商
+  gpt-4o:                                   # 无别名多供应商（顺序=优先级）
+    - openai
+    - azure
+  sonnet:                                   # 有别名：供应商后接真实模型名
+    - anthropic: claude-sonnet-4
+  gpt4:                                     # 供应商后接列表（依次 fallback）
+    - openai: gpt-4
+    - azure: [gpt4o-deploy, gpt4o-turbo]
 ```
 
 **gateway 监听地址优先级**（高 -> 低）：`llmport start --host/--port` > `providers.yaml` 的 `gateway:` 段 > 默认（`127.0.0.1:11434`）。无环境变量层。

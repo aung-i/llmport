@@ -39,17 +39,14 @@ def _make_app(tmp):
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [
             {
-                "id": "test-p",
-                "name": "Test",
+                "name": "test-p",
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
                 "api_key": "sk-test",
             },
         ],
     })
-    store.save_models_config({"models": [
-        {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
-    ]})
+    store.save_models_config({"models": {"gpt5": {"test-p": "gpt-5"}}})
     return gateway_server.create_app(store)
 
 

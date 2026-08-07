@@ -37,7 +37,7 @@ def test_save_models_config_sets_models_yaml_to_600():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        store.save_models_config({"models": []})
+        store.save_models_config({"models": {}})
 
         mode = stat.S_IMODE(os.stat(store.models_path).st_mode)
         assert mode == 0o600, (
@@ -87,8 +87,7 @@ def test_non_posix_platform_does_not_raise():
         store.init_first_run()
         pdata = store.load_providers_config()
         pdata["providers"].append({
-            "id": "test",
-            "name": "Test",
+            "name": "test",
             "protocol": "openai",
             "base_url": "https://api.example.com",
             "api_key": "sk-test",
@@ -97,7 +96,7 @@ def test_non_posix_platform_does_not_raise():
         with patch("os.chmod", side_effect=OSError("not supported on this platform")):
             # Must not raise.
             store.save_providers_config(pdata)
-            store.save_models_config({"models": []})
+            store.save_models_config({"models": {}})
 
         # Data must still be readable and intact.
         loaded = store.load_providers_config()

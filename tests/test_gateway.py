@@ -15,17 +15,14 @@ def _make_store(tmp):
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [
             {
-                "id": "openai",
-                "name": "OpenAI",
+                "name": "openai",
                 "protocol": "openai",
                 "base_url": "https://api.openai.com",
                 "api_key": "sk-test",
             },
         ],
     })
-    store.save_models_config({"models": [
-        {"name": "gpt-5", "provider": "openai", "upstream": "gpt-5"},
-    ]})
+    store.save_models_config({"models": {"gpt-5": "openai"}})
     return store
 
 

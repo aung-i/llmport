@@ -166,7 +166,7 @@ async def openai_chat(request: Request) -> Response:
 
     if is_stream:
         async def generate():
-            last_id = provider.id
+            last_binding = (provider.name, model_name)
             cur_provider = provider
             cur_model = model_name
 
@@ -187,12 +187,12 @@ async def openai_chat(request: Request) -> Response:
 
                 # Find next fallback with matching protocol
                 while True:
-                    fb = router.try_fallback(requested, last_id)
+                    fb = router.try_fallback(requested, last_binding)
                     if not fb:
                         yield first_chunk  # all exhausted
                         return
                     fb_provider, fb_model = fb
-                    last_id = fb_provider.id
+                    last_binding = (fb_provider.name, fb_model)
                     if fb_provider.protocol == "openai":
                         cur_provider = fb_provider
                         cur_model = fb_model
@@ -206,21 +206,21 @@ async def openai_chat(request: Request) -> Response:
     else:
         result, error = await openai_handler.forward(body, provider, model_name)
         if error:
-            last_id = provider.id
+            last_binding = (provider.name, model_name)
             while True:
-                fb = router.try_fallback(requested, last_id)
+                fb = router.try_fallback(requested, last_binding)
                 if not fb:
                     break
                 fb_provider, fb_model = fb
                 if fb_provider.protocol != "openai":
-                    last_id = fb_provider.id
+                    last_binding = (fb_provider.name, fb_model)
                     continue
                 result, error = await openai_handler.forward(
                     body, fb_provider, fb_model
                 )
                 if not error:
                     break
-                last_id = fb_provider.id
+                last_binding = (fb_provider.name, fb_model)
 
         state.request_count += 1
         if error:
@@ -316,7 +316,7 @@ async def anthropic_messages(request: Request) -> Response:
 
     if is_stream:
         async def generate():
-            last_id = provider.id
+            last_binding = (provider.name, model_name)
             cur_provider = provider
             cur_model = model_name
 
@@ -337,12 +337,12 @@ async def anthropic_messages(request: Request) -> Response:
 
                 # Find next fallback with matching protocol
                 while True:
-                    fb = router.try_fallback(requested, last_id)
+                    fb = router.try_fallback(requested, last_binding)
                     if not fb:
                         yield first_chunk  # all exhausted
                         return
                     fb_provider, fb_model = fb
-                    last_id = fb_provider.id
+                    last_binding = (fb_provider.name, fb_model)
                     if fb_provider.protocol == "anthropic":
                         cur_provider = fb_provider
                         cur_model = fb_model
@@ -356,21 +356,21 @@ async def anthropic_messages(request: Request) -> Response:
     else:
         result, error = await anthropic_handler.forward(body, provider, model_name)
         if error:
-            last_id = provider.id
+            last_binding = (provider.name, model_name)
             while True:
-                fb = router.try_fallback(requested, last_id)
+                fb = router.try_fallback(requested, last_binding)
                 if not fb:
                     break
                 fb_provider, fb_model = fb
                 if fb_provider.protocol != "anthropic":
-                    last_id = fb_provider.id
+                    last_binding = (fb_provider.name, fb_model)
                     continue
                 result, error = await anthropic_handler.forward(
                     body, fb_provider, fb_model
                 )
                 if not error:
                     break
-                last_id = fb_provider.id
+                last_binding = (fb_provider.name, fb_model)
 
         state.request_count += 1
         if error:

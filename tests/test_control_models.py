@@ -26,13 +26,11 @@ def _make_app(tmp):
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [
-            {"id": "p1", "name": "P1", "protocol": "openai",
+            {"name": "p1", "protocol": "openai",
              "base_url": "https://api.p1.com", "api_key": "sk-p1"},
         ],
     })
-    store.save_models_config({"models": [
-        {"name": "gpt-5", "provider": "p1", "upstream": "gpt-5"},
-    ]})
+    store.save_models_config({"models": {"gpt-5": "p1"}})
     return create_app(store)
 
 
@@ -52,7 +50,7 @@ class TestControlStatusEndpoint:
             assert data["provider_count"] == 1
             assert data["model_count"] == 1
             assert data["models"] == ["gpt-5"]
-            assert data["providers"][0]["id"] == "p1"
+            assert data["providers"][0]["name"] == "p1"
             assert "uptime" in data and "request_count" in data
             assert data["gateway"]["host"] == "127.0.0.1"
 
@@ -68,14 +66,14 @@ class TestControlStatusEndpoint:
                 "version: 1\n"
                 "gateway:\n  host: 127.0.0.1\n  port: 11434\n"
                 "providers:\n"
-                "  - id: bad\n    name: Bad\n    protocol: openai\n"
+                "  - name: bad\n    protocol: openai\n"
                 "    base_url: http://169.254.169.254\n"
                 "    api_key: sk\n",
                 encoding="utf-8",
             )
             client = TestClient(create_app(store))
             data = client.get("/api/status").json()
-            assert data["providers"][0]["id"] == "bad"
+            assert data["providers"][0]["name"] == "bad"
             assert data["providers"][0]["status"] == "down"
 
 
