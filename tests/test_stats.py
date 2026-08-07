@@ -34,7 +34,7 @@ def _make_app(tmp):
     """Create a gateway app with one OpenAI provider and a 'gpt5' model."""
     store = ConfigStore(tmp)
     store.init_first_run()
-    store.save_config({
+    store.save_providers_config({
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [
@@ -43,13 +43,13 @@ def _make_app(tmp):
                 "name": "Test",
                 "protocol": "openai",
                 "base_url": "https://api.example.com",
+                "api_key": "sk-test",
             },
         ],
-        "models": [
-            {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
-        ],
     })
-    store.save_secrets({"test-p": "sk-test"})
+    store.save_models_config({"models": [
+        {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
+    ]})
     return gateway_server.create_app(store)
 
 

@@ -18,7 +18,7 @@ from llmport.config.store import ConfigStore
 from llmport.gateway import server as gateway_server
 
 
-_BASE_CONFIG = {
+_BASE_PROVIDERS = {
     "version": 1,
     "gateway": {"host": "127.0.0.1", "port": 11434},
     "providers": [
@@ -27,12 +27,14 @@ _BASE_CONFIG = {
             "name": "Test",
             "protocol": "openai",
             "base_url": "https://api.example.com",
+            "api_key": "sk-test",
         },
     ],
-    "models": [
-        {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
-    ],
 }
+
+_BASE_MODELS = {"models": [
+    {"name": "gpt5", "provider": "test-p", "upstream": "gpt-5"},
+]}
 
 
 def _make_app(tmp: str):
@@ -43,8 +45,8 @@ def _make_app(tmp: str):
     """
     store = ConfigStore(tmp)
     store.init_first_run()
-    store.save_config(_BASE_CONFIG)
-    store.save_secrets({"test-p": "sk-test"})
+    store.save_providers_config(_BASE_PROVIDERS)
+    store.save_models_config(_BASE_MODELS)
     return gateway_server.create_app(store)
 
 
@@ -52,8 +54,8 @@ def _make_store(tmp: str):
     """Create an initialised ConfigStore with the base provider/model."""
     store = ConfigStore(tmp)
     store.init_first_run()
-    store.save_config(_BASE_CONFIG)
-    store.save_secrets({"test-p": "sk-test"})
+    store.save_providers_config(_BASE_PROVIDERS)
+    store.save_models_config(_BASE_MODELS)
     return store
 
 
@@ -294,13 +296,7 @@ class TestOpenaiModels:
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
-            store.save_config({
-                "version": 1,
-                "gateway": {"host": "127.0.0.1", "port": 11434},
-                "providers": [],
-                "models": [],
-            })
-            store.save_secrets({})
+            # No models saved -> models.yaml defaults to empty.
             app = gateway_server.create_app(store)
             client = TestClient(app)
             resp = client.get("/openai/v1/models")

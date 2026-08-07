@@ -225,6 +225,22 @@ class TestStart:
             assert dm.start() is True
             MockPopen.assert_not_called()
 
+    def test_start_passes_host_port_to_subprocess(self, tmp_path):
+        """start(host, port) forwards --host/--port on the daemon subprocess argv
+        so the gateway priority chain (CLI > providers.yaml > default) works."""
+        from llmport.daemon import DaemonManager
+
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch("llmport.daemon.subprocess.Popen") as MockPopen, \
+             patch("llmport.daemon.httpx.Client") as MockClient, \
+             patch("llmport.daemon.time.sleep"), \
+             patch.object(dm, "is_running", side_effect=[False, True]):
+            MockClient.return_value.__enter__.return_value.get.return_value.status_code = 200
+            dm.start(host="127.0.0.1", port=9999)
+        cmd = MockPopen.call_args[0][0]
+        assert "--host" in cmd and "127.0.0.1" in cmd
+        assert "--port" in cmd and "9999" in cmd
+
 
 class TestRestart:
     """DaemonManager.restart()"""
@@ -284,19 +300,19 @@ class TestGatewayPortFallback:
     """_gateway_port falls back to config, then default."""
 
     def test_falls_back_to_config(self, tmp_path):
-        """When the PID file has no port, the config gateway port is used."""
+        """When the PID file has no port, the providers.yaml gateway port is used."""
         from llmport.daemon import DaemonManager
         from llmport.config.store import ConfigStore
 
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
-        store.save_config({
+        store.save_providers_config({
             "version": 1,
             "gateway": {"host": "127.0.0.1", "port": 22000},
-            "providers": [], "models": [],
+            "providers": [],
         })
         dm = DaemonManager(config_dir=str(tmp_path))
-        # No PID file -> port comes from config.
+        # No PID file -> port comes from providers.yaml.
         assert dm._gateway_port() == 22000
 
     def test_falls_back_to_default(self, tmp_path):
@@ -338,3 +354,69 @@ class TestGetStatus:
         assert status["running"] is True
         assert status["request_count"] == 5
         assert status["models"] == ["gpt-x"]
+
+
+class TestResolveGateway:
+    """resolve_gateway: CLI args > providers.yaml > default."""
+
+    def test_cli_port_overrides_config(self, tmp_path):
+        from llmport.daemon import resolve_gateway
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path))
+        store.init_first_run()
+        store.save_providers_config({
+            "version": 1,
+            "gateway": {"host": "127.0.0.1", "port": 22000},
+            "providers": [],
+        })
+        gw = resolve_gateway(store, cli_host=None, cli_port=33000)
+        assert gw == {"host": "127.0.0.1", "port": 33000}
+
+    def test_config_overrides_default(self, tmp_path):
+        from llmport.daemon import resolve_gateway
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path))
+        store.init_first_run()
+        store.save_providers_config({
+            "version": 1,
+            "gateway": {"host": "127.0.0.1", "port": 22000},
+            "providers": [],
+        })
+        assert resolve_gateway(store) == {"host": "127.0.0.1", "port": 22000}
+
+    def test_default_when_no_config(self, tmp_path):
+        from llmport.daemon import resolve_gateway
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path))  # no providers.yaml yet
+        assert resolve_gateway(store) == {"host": "127.0.0.1", "port": 11434}
+
+    def test_corrupt_providers_file_falls_back_to_default(self, tmp_path):
+        from llmport.daemon import resolve_gateway
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path))
+        store.dir.mkdir(parents=True, exist_ok=True)
+        store.providers_path.write_text("- not a dict\n")
+        assert resolve_gateway(store) == {"host": "127.0.0.1", "port": 11434}
+
+
+class TestArgvFlagValue:
+    """_argv_flag_value parses --flag value / --flag=value from sys.argv."""
+
+    def test_space_separated(self, monkeypatch):
+        from llmport.daemon import _argv_flag_value
+        monkeypatch.setattr("sys.argv", ["llmport", "--daemon", "--host", "1.2.3.4"])
+        assert _argv_flag_value("--host") == "1.2.3.4"
+
+    def test_equals_separated(self, monkeypatch):
+        from llmport.daemon import _argv_flag_value
+        monkeypatch.setattr("sys.argv", ["llmport", "--daemon", "--port=9999"])
+        assert _argv_flag_value("--port") == "9999"
+
+    def test_missing_flag_returns_none(self, monkeypatch):
+        from llmport.daemon import _argv_flag_value
+        monkeypatch.setattr("sys.argv", ["llmport", "--daemon"])
+        assert _argv_flag_value("--host") is None

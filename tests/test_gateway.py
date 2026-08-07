@@ -10,7 +10,7 @@ def _make_store(tmp):
     """Create a ConfigStore with one OpenAI provider and one logical model."""
     store = ConfigStore(tmp)
     store.init_first_run()
-    store.save_config({
+    store.save_providers_config({
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [
@@ -19,13 +19,13 @@ def _make_store(tmp):
                 "name": "OpenAI",
                 "protocol": "openai",
                 "base_url": "https://api.openai.com",
+                "api_key": "sk-test",
             },
         ],
-        "models": [
-            {"name": "gpt-5", "provider": "openai", "upstream": "gpt-5"},
-        ],
     })
-    store.save_secrets({"openai": "sk-test"})
+    store.save_models_config({"models": [
+        {"name": "gpt-5", "provider": "openai", "upstream": "gpt-5"},
+    ]})
     return store
 
 

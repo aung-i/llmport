@@ -6,7 +6,7 @@ import pytest
 
 from llmport.config.validation import (
     validate_provider_base_url,
-    validate_config,
+    validate_providers_config,
 )
 
 
@@ -94,18 +94,18 @@ def test_rejects_malformed_urls(url):
         validate_provider_base_url(url, "127.0.0.1", 11434)
 
 
-# ── validate_config ──────────────────────────────────────────────────────
+# ── validate_providers_config ──────────────────────────────────────────────────────
 
-def test_validate_config_passes_clean_providers():
-    validate_config({
+def test_validate_providers_config_passes_clean_providers():
+    validate_providers_config({
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [{"id": "p", "base_url": "https://api.openai.com"}],
     })  # no raise
 
 
-def test_validate_config_rejects_bad_provider():
+def test_validate_providers_config_rejects_bad_provider():
     with pytest.raises(ValueError, match="SSRF"):
-        validate_config({
+        validate_providers_config({
             "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [
                 {"id": "p", "base_url": "http://169.254.169.254"},
@@ -113,9 +113,9 @@ def test_validate_config_rejects_bad_provider():
         })
 
 
-def test_validate_config_rejects_self_loop_provider():
+def test_validate_providers_config_rejects_self_loop_provider():
     with pytest.raises(ValueError, match="请求循环"):
-        validate_config({
+        validate_providers_config({
             "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [
                 {"id": "p", "base_url": "http://127.0.0.1:11434"},
@@ -123,20 +123,20 @@ def test_validate_config_rejects_self_loop_provider():
         })
 
 
-def test_validate_config_noop_on_non_dict_or_empty():
-    validate_config(None)       # no raise
-    validate_config({})         # no providers
-    validate_config({"providers": []})
+def test_validate_providers_config_noop_on_non_dict_or_empty():
+    validate_providers_config(None)       # no raise
+    validate_providers_config({})         # no providers
+    validate_providers_config({"providers": []})
 
 
-def test_validate_config_skips_provider_without_base_url():
+def test_validate_providers_config_skips_provider_without_base_url():
     """A provider missing base_url is skipped (not a validation error here)."""
-    validate_config({"providers": [{"id": "p"}]})  # no raise
+    validate_providers_config({"providers": [{"id": "p"}]})  # no raise
 
 
-def test_validate_config_skips_non_dict_provider():
+def test_validate_providers_config_skips_non_dict_provider():
     """A non-dict provider entry is skipped, not crashed on."""
-    validate_config({"providers": ["not-a-dict", 42]})  # no raise
+    validate_providers_config({"providers": ["not-a-dict", 42]})  # no raise
 
 
 def test_non_ip_resolve_result_skipped():
@@ -147,30 +147,28 @@ def test_non_ip_resolve_result_skipped():
         validate_provider_base_url("http://weird.example", "127.0.0.1", 11434)
 
 
-# ── save_config chokepoint ───────────────────────────────────────────────
+# ── save_providers_config chokepoint ─────────────────────────────────────
 
-def test_save_config_rejects_metadata_base_url(tmp_path):
-    """ConfigStore.save_config is the single chokepoint that guards writes."""
+def test_save_providers_config_rejects_metadata_base_url(tmp_path):
+    """ConfigStore.save_providers_config is the single chokepoint that guards writes."""
     from llmport.config.store import ConfigStore
     store = ConfigStore(str(tmp_path / "llmport"))
     store.init_first_run()
     with pytest.raises(ValueError, match="SSRF"):
-        store.save_config({
+        store.save_providers_config({
             "version": 1,
             "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [{"id": "p", "base_url": "http://169.254.169.254"}],
-            "models": [],
         })
 
 
-def test_save_config_allows_local_base_url(tmp_path):
+def test_save_providers_config_allows_local_base_url(tmp_path):
     from llmport.config.store import ConfigStore
     store = ConfigStore(str(tmp_path / "llmport"))
     store.init_first_run()
-    store.save_config({
+    store.save_providers_config({
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [{"id": "p", "base_url": "http://127.0.0.1:11435"}],
-        "models": [],
     })  # no raise
 

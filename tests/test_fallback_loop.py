@@ -27,8 +27,8 @@ def _make_app(tmp, provider_specs: list[tuple[str, str]]):
     """
     store = ConfigStore(tmp)
     store.init_first_run()
-    config = store.load_config()
-    config["providers"] = [
+    pdata = store.load_providers_config()
+    pdata["providers"] = [
         {
             "id": pid,
             "name": f"Provider {pid}",
@@ -38,10 +38,12 @@ def _make_app(tmp, provider_specs: list[tuple[str, str]]):
                 if proto == "openai"
                 else "https://api.anthropic.com"
             ),
+            "api_key": "sk-test",
         }
         for pid, proto in provider_specs
     ]
-    config["models"] = [
+    store.save_providers_config(pdata)
+    store.save_models_config({"models": [
         {
             "name": "m",
             "bindings": [
@@ -49,9 +51,7 @@ def _make_app(tmp, provider_specs: list[tuple[str, str]]):
                 for i, (pid, _) in enumerate(provider_specs)
             ],
         }
-    ]
-    store.save_config(config)
-    store.save_secrets({pid: "sk-test" for pid, _ in provider_specs})
+    ]})
     return create_app(store)
 
 # ---------------------------------------------------------------------------

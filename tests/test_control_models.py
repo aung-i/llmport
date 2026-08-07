@@ -3,8 +3,8 @@
 The control API was narrowed to read-only status + lifecycle. Configuration
 CRUD / test / fetch endpoints were removed (they formed a programmatic SSRF
 entry via arbitrary ``base_url``); providers and models are now managed
-through the CLI, which writes ``config.yaml`` + ``secrets.yaml`` and restarts
-the daemon.
+through the CLI, which writes ``providers.yaml`` + ``models.yaml`` and
+restarts the daemon.
 """
 
 import tempfile
@@ -22,18 +22,17 @@ def _make_app(tmp):
     """Create the gateway app with one provider and one model."""
     store = ConfigStore(tmp)
     store.init_first_run()
-    store.save_config({
+    store.save_providers_config({
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
         "providers": [
             {"id": "p1", "name": "P1", "protocol": "openai",
-             "base_url": "https://api.p1.com"},
-        ],
-        "models": [
-            {"name": "gpt-5", "provider": "p1", "upstream": "gpt-5"},
+             "base_url": "https://api.p1.com", "api_key": "sk-p1"},
         ],
     })
-    store.save_secrets({"p1": "sk-p1"})
+    store.save_models_config({"models": [
+        {"name": "gpt-5", "provider": "p1", "upstream": "gpt-5"},
+    ]})
     return create_app(store)
 
 
@@ -58,21 +57,20 @@ class TestControlStatusEndpoint:
             assert data["gateway"]["host"] == "127.0.0.1"
 
     def test_bad_base_url_provider_marked_down(self):
-        """A provider with an SSRF base_url (hand-edited config) is loaded but
-        marked 'down' so the router skips it -- never forwarded to."""
+        """A provider with an SSRF base_url (hand-edited providers.yaml) is
+        loaded but marked 'down' so the router skips it -- never forwarded to."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
-            store.save_secrets({"bad": "sk"})
-            # Write config directly to disk, bypassing save_config validation
-            # (simulates a hand-edited config.yaml).
-            store.config_path.write_text(
+            # Write providers.yaml directly to disk, bypassing
+            # save_providers_config validation (simulates a hand-edited file).
+            store.providers_path.write_text(
                 "version: 1\n"
                 "gateway:\n  host: 127.0.0.1\n  port: 11434\n"
                 "providers:\n"
                 "  - id: bad\n    name: Bad\n    protocol: openai\n"
                 "    base_url: http://169.254.169.254\n"
-                "models: []\n",
+                "    api_key: sk\n",
                 encoding="utf-8",
             )
             client = TestClient(create_app(store))

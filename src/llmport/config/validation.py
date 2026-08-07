@@ -5,11 +5,12 @@ addresses (the high-value SSRF targets) and at the gateway's own address
 (request loop). Loopback and private ranges are ALLOWED so local LLM servers
 (Ollama, vLLM, internal gateways) keep working.
 
-This is the single chokepoint: :func:`ConfigStore.save_config` validates every
-provider base_url via :func:`validate_config`, and the CLI calls
-:func:`validate_provider_base_url` for early feedback before saving. The
-daemon's ``reload()`` marks any provider whose base_url fails validation as
-``"down"`` so the router skips it (defense-in-depth for hand-edited configs).
+This is the single chokepoint: :func:`ConfigStore.save_providers_config`
+validates every provider base_url via :func:`validate_providers_config`, and
+the CLI calls :func:`validate_provider_base_url` for early feedback before
+saving. The daemon's ``reload()`` marks any provider whose base_url fails
+validation as ``"down"`` so the router skips it (defense-in-depth for
+hand-edited configs).
 """
 
 import ipaddress
@@ -107,7 +108,7 @@ def validate_provider_base_url(
             )
 
 
-def validate_config(cfg: dict) -> None:
+def validate_providers_config(cfg: dict) -> None:
     """Validate every provider base_url in *cfg*. Raises ``ValueError``.
 
     No-op for non-dict input or configs without providers.

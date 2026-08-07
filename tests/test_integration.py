@@ -4,7 +4,6 @@ import tempfile
 
 from llmport.config.store import ConfigStore
 from llmport.gateway.server import create_app
-from llmport.gateway.state import migrate_gateway_config
 from starlette.testclient import TestClient
 
 
@@ -14,21 +13,20 @@ def test_full_flow():
         store = ConfigStore(tmp)
         store.init_first_run()
 
-        # Add a provider (no api_key in config - that goes to secrets)
-        config = store.load_config()
-        config["providers"].append({
+        # Add a provider (api_key lives in providers.yaml alongside base_url)
+        pdata = store.load_providers_config()
+        pdata["providers"].append({
             "id": "test-provider",
             "name": "Test",
             "protocol": "openai",
             "base_url": "https://httpbin.org",
+            "api_key": "sk-test",
         })
-        config["models"].append({
-            "name": "test-model",
-            "provider": "test-provider",
-            "upstream": "test-model-real",
-        })
-        store.save_config(config)
-        store.save_secrets({"test-provider": "sk-test"})
+        store.save_providers_config(pdata)
+        store.save_models_config({"models": [
+            {"name": "test-model", "provider": "test-provider",
+             "upstream": "test-model-real"},
+        ]})
 
         # Single app serves both protocol routes and control API
         app = create_app(store)
@@ -53,20 +51,18 @@ def test_protocol_mismatch_error():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        config = store.load_config()
-        config["providers"].append({
+        pdata = store.load_providers_config()
+        pdata["providers"].append({
             "id": "ant",
             "name": "Anthropic",
             "protocol": "anthropic",
             "base_url": "https://api.anthropic.com",
+            "api_key": "sk-ant-test",
         })
-        config["models"].append({
-            "name": "claude",
-            "provider": "ant",
-            "upstream": "claude-real",
-        })
-        store.save_config(config)
-        store.save_secrets({"ant": "sk-ant-test"})
+        store.save_providers_config(pdata)
+        store.save_models_config({"models": [
+            {"name": "claude", "provider": "ant", "upstream": "claude-real"},
+        ]})
         app = create_app(store)
         client = TestClient(app)
 
@@ -92,17 +88,9 @@ def test_stray_legacy_config_enc_is_ignored():
         # init_first_run must not choke on the stray blob.
         store.init_first_run()
 
-        assert store.config_path.exists()
-        assert store.secrets_path.exists()
-        assert store.load_config()["providers"] == []
-        assert store.load_secrets() == {}
-
-
-def test_config_migration_empty_gateway():
-    """migrate_gateway_config with empty gateway uses defaults."""
-    data = {"gateway": {}}
-    result = migrate_gateway_config(data)
-    assert result == {"host": "127.0.0.1", "port": 11434}
+        assert store.providers_path.exists()
+        assert store.models_path.exists()
+        assert store.load_providers_config()["providers"] == []
 
 
 def test_daemon_restart_endpoint():
@@ -168,12 +156,12 @@ def test_first_run_detection_with_empty_providers():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        config = store.load_config()
+        pdata = store.load_providers_config()
         # Fresh config has empty providers - should be detected as first run
-        assert config.get("providers") == []
+        assert pdata.get("providers") == []
 
         # Add a provider and verify detection works
-        config["providers"].append({"id": "test", "name": "Test"})
-        store.save_config(config)
-        config = store.load_config()
-        assert len(config["providers"]) == 1
+        pdata["providers"].append({"id": "test", "name": "Test"})
+        store.save_providers_config(pdata)
+        pdata = store.load_providers_config()
+        assert len(pdata["providers"]) == 1

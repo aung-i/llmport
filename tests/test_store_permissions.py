@@ -1,9 +1,9 @@
-"""Tests for config file and directory permissions after save (Issue 3).
+"""Tests for config file and directory permissions after save.
 
 After save, the spec requires:
-- config.yaml   -> permissions 0o600 (owner read/write only)
-- secrets.yaml  -> permissions 0o600 (owner read/write only)
-- directory     -> permissions 0o700 (owner read/write/execute only)
+- providers.yaml  -> permissions 0o600 (owner read/write only; holds api keys)
+- models.yaml     -> permissions 0o600 (owner read/write only)
+- directory       -> permissions 0o700 (owner read/write/execute only)
 - Non-POSIX platforms where chmod is unsupported must not raise.
 """
 
@@ -15,47 +15,50 @@ from unittest.mock import patch
 from llmport.config.store import ConfigStore
 
 
-def test_save_config_sets_config_yaml_to_600():
-    """After save_config(), config.yaml has permissions 0o600."""
+def test_save_providers_config_sets_providers_yaml_to_600():
+    """After save_providers_config(), providers.yaml has permissions 0o600."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        store.save_config({
+        store.save_providers_config({
             "version": 1,
             "gateway": {"host": "127.0.0.1", "port": 11434},
             "providers": [],
-            "models": [],
         })
 
-        mode = stat.S_IMODE(os.stat(store.config_path).st_mode)
+        mode = stat.S_IMODE(os.stat(store.providers_path).st_mode)
         assert mode == 0o600, (
-            f"Expected config.yaml permissions 0o600, got {oct(mode)}"
+            f"Expected providers.yaml permissions 0o600, got {oct(mode)}"
         )
 
 
-def test_save_secrets_sets_secrets_yaml_to_600():
-    """After save_secrets(), secrets.yaml has permissions 0o600."""
+def test_save_models_config_sets_models_yaml_to_600():
+    """After save_models_config(), models.yaml has permissions 0o600."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        store.save_secrets({"test": "sk-test"})
+        store.save_models_config({"models": []})
 
-        mode = stat.S_IMODE(os.stat(store.secrets_path).st_mode)
+        mode = stat.S_IMODE(os.stat(store.models_path).st_mode)
         assert mode == 0o600, (
-            f"Expected secrets.yaml permissions 0o600, got {oct(mode)}"
+            f"Expected models.yaml permissions 0o600, got {oct(mode)}"
         )
 
 
-def test_save_secrets_sets_directory_to_700():
-    """After save_secrets(), the config directory has permissions 0o700."""
+def test_save_providers_config_sets_directory_to_700():
+    """After save_providers_config(), the config directory has permissions 0o700."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
 
-        # Deliberately loosen directory permissions so we can verify save_secrets
+        # Deliberately loosen directory permissions so we can verify the save
         # restores them.
         os.chmod(store.dir, 0o755)
-        store.save_secrets({"test": "sk-test"})
+        store.save_providers_config({
+            "version": 1,
+            "gateway": {"host": "127.0.0.1", "port": 11434},
+            "providers": [],
+        })
 
         mode = stat.S_IMODE(os.stat(store.dir).st_mode)
         assert mode == 0o700, (
@@ -77,25 +80,27 @@ def test_init_first_run_creates_directory_with_700():
 
 def test_non_posix_platform_does_not_raise():
     """If the underlying platform does not support chmod (OSError),
-    save_config()/save_secrets() must catch the error and not propagate it."""
+    save_providers_config()/save_models_config() must catch the error and not
+    propagate it."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        config = store.load_config()
-        config["providers"].append({
+        pdata = store.load_providers_config()
+        pdata["providers"].append({
             "id": "test",
             "name": "Test",
             "protocol": "openai",
             "base_url": "https://api.example.com",
+            "api_key": "sk-test",
         })
 
         with patch("os.chmod", side_effect=OSError("not supported on this platform")):
             # Must not raise.
-            store.save_config(config)
-            store.save_secrets({"test": "sk-test"})
+            store.save_providers_config(pdata)
+            store.save_models_config({"models": []})
 
         # Data must still be readable and intact.
-        loaded = store.load_config()
+        loaded = store.load_providers_config()
         assert loaded["version"] == 1
         assert len(loaded["providers"]) == 1
-        assert store.load_secrets() == {"test": "sk-test"}
+        assert loaded["providers"][0]["api_key"] == "sk-test"

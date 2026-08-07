@@ -19,12 +19,13 @@ from llmport.daemon import DaemonManager, run_daemon
 
 __version__ = "0.1.0"
 
-_DEFAULT_CFG = {
+_DEFAULT_PROVIDERS = {
     "version": 1,
     "gateway": {"host": "127.0.0.1", "port": 11434},
     "providers": [],
-    "models": [],
 }
+
+_DEFAULT_MODELS = {"models": []}
 
 # ============================================================================
 # Typer app & command wiring
@@ -63,6 +64,12 @@ def _main(
     daemon: bool = typer.Option(
         False, "--daemon", hidden=True,
         callback=_daemon_callback, is_eager=True),
+    host: str | None = typer.Option(
+        None, "--host", hidden=True, is_eager=True,
+        help="网关监听地址(覆盖 providers.yaml;由 start 传给 daemon 子进程)"),
+    port: int | None = typer.Option(
+        None, "--port", hidden=True, is_eager=True,
+        help="网关监听端口(覆盖 providers.yaml)"),
     version: bool = typer.Option(
         None, "--version", "-V",
         callback=_version_callback, is_eager=True,
@@ -73,6 +80,9 @@ def _main(
     # tui 入口暂时移除（后端 app.py/ui/* 保留）；恢复时加 @app.command("tui")
     # 调 from llmport.app import LlmPortApp; LlmPortApp().run()。
     # --daemon / --version are handled by their eager option callbacks above.
+    # --host/--port are declared (hidden) so the daemon subprocess launched as
+    # `llmport --daemon --host X --port Y` accepts them; run_daemon reads them
+    # from argv directly (the eager --daemon callback exits first).
 
 
 # --- lifecycle commands ----------------------------------------------------
@@ -84,8 +94,13 @@ def _cli_setup() -> None:
 
 
 @app.command("start")
-def _cli_start() -> None:
-    _cmd_start(DaemonManager())
+def _cli_start(
+    host: str | None = typer.Option(
+        None, "--host", help="网关监听地址(覆盖 providers.yaml)"),
+    port: int | None = typer.Option(
+        None, "--port", help="网关监听端口(覆盖 providers.yaml)"),
+) -> None:
+    _cmd_start(DaemonManager(), host=host, port=port)
 
 
 @app.command("stop")
@@ -94,8 +109,13 @@ def _cli_stop() -> None:
 
 
 @app.command("restart")
-def _cli_restart() -> None:
-    _cmd_restart(DaemonManager())
+def _cli_restart(
+    host: str | None = typer.Option(
+        None, "--host", help="网关监听地址(覆盖 providers.yaml)"),
+    port: int | None = typer.Option(
+        None, "--port", help="网关监听端口(覆盖 providers.yaml)"),
+) -> None:
+    _cmd_restart(DaemonManager(), host=host, port=port)
 
 
 @app.command("status")
@@ -168,7 +188,9 @@ def _cli_config_init() -> None:
 
 @config_app.command("path")
 def _cli_config_path() -> None:
-    print(str(DaemonManager().store.config_path))
+    store = DaemonManager().store
+    print(f"providers: {store.providers_path}")
+    print(f"models:    {store.models_path}")
 
 
 @config_app.command("show")
@@ -177,8 +199,11 @@ def _cli_config_show() -> None:
 
 
 @config_app.command("edit")
-def _cli_config_edit() -> None:
-    _config_edit(DaemonManager())
+def _cli_config_edit(
+    target: str = typer.Option(
+        "providers", "--target", "-t", help="编辑哪个文件: providers | models"),
+) -> None:
+    _config_edit(DaemonManager(), target=target)
 
 
 def main() -> None:
@@ -191,7 +216,7 @@ def main() -> None:
 
 
 def _cmd_setup(dm: DaemonManager) -> None:
-    """Bootstrap the config directory, template config, and empty secrets file.
+    """Bootstrap the config directory and template files.
 
     Setup does NOT prompt for providers/models -- that's what ``provider add``
     and ``model add`` are for. Setup just lays down the files and points the
@@ -202,8 +227,8 @@ def _cmd_setup(dm: DaemonManager) -> None:
 
     print("llmport 设置")
     print(f"配置目录: {store.dir}")
-    print(f"  config.yaml   路由配置 (供应商/模型,不含 API key,可手编辑)")
-    print(f"  secrets.yaml  API key 明文存储 (0600,不写进 config.yaml)")
+    print(f"  providers.yaml  供应商配置 (含 gateway + base_url + API key, 0600)")
+    print(f"  models.yaml     模型映射 (公开名 -> 供应商模型, 0600)")
     print()
     print("下一步:")
     print("  llmport provider add --id anthropic --protocol anthropic   # 加供应商")
@@ -222,7 +247,7 @@ def _provider_add(
     dm: DaemonManager, *, id: str, name: str | None, protocol: str,
     base_url: str | None, api_key: str | None,
 ) -> None:
-    """Add or update a provider. The API key is stored in secrets.yaml (plaintext).
+    """Add or update a provider (base_url + api_key together in providers.yaml).
 
     Updating an existing provider without ``--api-key`` preserves the
     existing key; only a brand-new provider prompts for one.
@@ -230,9 +255,8 @@ def _provider_add(
     store = dm.store
     _ensure_store_init(store)
 
-    cfg = _safe_load_config(store) or dict(_DEFAULT_CFG)
-    providers = cfg.get("providers", [])
-    secrets = store.load_secrets()
+    pdata = _safe_load_providers(store) or dict(_DEFAULT_PROVIDERS)
+    providers = pdata.get("providers", [])
 
     pid = id
     existing = next((p for p in providers if p["id"] == pid), None)
@@ -243,8 +267,8 @@ def _provider_add(
                     else "https://api.anthropic.com")
 
     # SSRF blocklist (metadata / self-loop). Reject before touching disk so a
-    # bad URL never lands in config.yaml. save_config re-checks as a safety net.
-    gw = cfg.get("gateway") or {}
+    # bad URL never lands in providers.yaml. save_providers_config re-checks.
+    gw = pdata.get("gateway") or {}
     try:
         from llmport.config.validation import validate_provider_base_url
         validate_provider_base_url(
@@ -263,17 +287,16 @@ def _provider_add(
                 print("无法交互读取 API key（非交互式环境）。请用 --api-key 传入。")
                 return
         else:
-            api_key = secrets.get(pid, "")  # keep existing key on update
+            api_key = existing.get("api_key", "")  # keep existing key on update
 
     name = name or pid
-    providers = [p for p in providers if p["id"] != pid] + [{
-        "id": pid, "name": name, "protocol": protocol, "base_url": base_url}]
+    entry = {"id": pid, "name": name, "protocol": protocol, "base_url": base_url}
     if api_key:
-        secrets[pid] = api_key
+        entry["api_key"] = api_key
+    providers = [p for p in providers if p["id"] != pid] + [entry]
 
-    cfg["providers"] = providers
-    store.save_config(cfg)
-    store.save_secrets(secrets)
+    pdata["providers"] = providers
+    store.save_providers_config(pdata)
 
     if existing is None:
         print(f"已添加供应商 {pid} (API key {'已存储' if api_key else '未设置'})")
@@ -286,31 +309,29 @@ def _provider_add(
 
 
 def _provider_list(dm: DaemonManager) -> None:
-    cfg = _safe_load_config(dm.store)
-    if not cfg or not cfg.get("providers"):
+    pdata = _safe_load_providers(dm.store)
+    if not pdata or not pdata.get("providers"):
         print("无供应商。运行 `llmport provider add --id <id>` 添加。")
         return
     print(f"{'ID':<16} {'协议':<10} {'base_url':<34} 名称")
-    for p in cfg["providers"]:
+    for p in pdata["providers"]:
         print(f"{p['id']:<16} {p['protocol']:<10} {p['base_url']:<34} {p.get('name', '')}")
 
 
 def _provider_remove(dm: DaemonManager, pid: str) -> None:
     store = dm.store
-    cfg = _safe_load_config(store)
-    if not cfg:
+    pdata = _safe_load_providers(store)
+    if not pdata:
         print("无配置文件。")
         return
-    providers = cfg.get("providers", [])
+    providers = pdata.get("providers", [])
     new = [p for p in providers if p["id"] != pid]
     if len(new) == len(providers):
         print(f"未找到供应商 {pid}。")
         return
-    cfg["providers"] = new
-    secrets = store.load_secrets()
-    secrets.pop(pid, None)
-    store.save_config(cfg)
-    store.save_secrets(secrets)
+    pdata["providers"] = new
+    # The api_key lives inside the provider entry, so it is removed with it.
+    store.save_providers_config(pdata)
     print(f"已删除供应商 {pid}（及其 key）。")
     _apply_if_running(dm)
 
@@ -318,26 +339,26 @@ def _provider_remove(dm: DaemonManager, pid: str) -> None:
 def _provider_test(dm: DaemonManager, pid: str) -> None:
     """Test a configured provider's connection directly from disk.
 
-    No daemon required: reads config + secrets, then calls the same handler
-    functions the control API uses. For OpenAI it lists upstream models
-    (handy for picking the ``upstream`` name in a model mapping); for
-    Anthropic it sends a minimal 1-token request.
+    No daemon required: reads providers.yaml (which holds the api_key
+    alongside base_url), then calls the same handler functions the control
+    API uses. For OpenAI it lists upstream models (handy for picking the
+    ``upstream`` name in a model mapping); for Anthropic it sends a minimal
+    1-token request.
     """
     import asyncio
 
     store = dm.store
-    cfg = _safe_load_config(store)
-    if not cfg:
+    pdata = _safe_load_providers(store)
+    if not pdata:
         print("无配置文件。运行 `llmport config init` 或 `llmport provider add`。")
         return
-    providers = cfg.get("providers", [])
+    providers = pdata.get("providers", [])
     entry = next((p for p in providers if p.get("id") == pid), None)
     if not entry:
         ids = ", ".join(p.get("id", "") for p in providers) or "（无）"
         print(f"未找到供应商 {pid}。已配置: {ids}")
         return
-    secrets = store.load_secrets()
-    api_key = secrets.get(pid, "")
+    api_key = entry.get("api_key", "")
     if not api_key:
         print(f"供应商 {pid} 未设置 API key。")
         print(f"运行 `llmport provider add --id {pid} --api-key <key>` 补上。")
@@ -396,30 +417,31 @@ def _model_add(
     store = dm.store
     _ensure_store_init(store)
 
-    cfg = _safe_load_config(store) or dict(_DEFAULT_CFG)
-    provider_ids = [p["id"] for p in cfg.get("providers", [])]
+    pdata = _safe_load_providers(store) or dict(_DEFAULT_PROVIDERS)
+    provider_ids = [p["id"] for p in pdata.get("providers", [])]
     if provider not in provider_ids:
         print(f"未知供应商 {provider}。先运行: llmport provider add --id {provider}")
         return
 
     upstream = upstream or name
-    models = cfg.get("models", [])
+    mdata = _safe_load_models(store) or dict(_DEFAULT_MODELS)
+    models = mdata.get("models", [])
     existed = any(m.get("name") == name for m in models)
     models = [m for m in models if m.get("name") != name]
     models.append({"name": name, "provider": provider, "upstream": upstream})
-    cfg["models"] = models
-    store.save_config(cfg)
+    mdata["models"] = models
+    store.save_models_config(mdata)
     print(f"{'已更新' if existed else '已添加'}模型 {name} -> {provider}/{upstream}")
     _apply_if_running(dm)
 
 
 def _model_list(dm: DaemonManager) -> None:
-    cfg = _safe_load_config(dm.store)
-    if not cfg or not cfg.get("models"):
+    mdata = _safe_load_models(dm.store)
+    if not mdata or not mdata.get("models"):
         print("无模型。运行 `llmport model add --name <n> --provider <p>` 添加。")
         return
     print(f"{'公开名':<20} {'供应商':<14} {'upstream':<24}")
-    for m in cfg["models"]:
+    for m in mdata["models"]:
         bindings = m.get("bindings")
         if bindings:
             for b in bindings:
@@ -430,17 +452,17 @@ def _model_list(dm: DaemonManager) -> None:
 
 def _model_remove(dm: DaemonManager, name: str) -> None:
     store = dm.store
-    cfg = _safe_load_config(store)
-    if not cfg:
+    mdata = _safe_load_models(store)
+    if not mdata:
         print("无配置文件。")
         return
-    models = cfg.get("models", [])
+    models = mdata.get("models", [])
     new = [m for m in models if m.get("name") != name]
     if len(new) == len(models):
         print(f"未找到模型 {name}。")
         return
-    cfg["models"] = new
-    store.save_config(cfg)
+    mdata["models"] = new
+    store.save_models_config(mdata)
     print(f"已删除模型 {name}。")
     _apply_if_running(dm)
 
@@ -451,56 +473,66 @@ def _model_remove(dm: DaemonManager, name: str) -> None:
 
 
 def _config_init(dm: DaemonManager) -> None:
-    """Write the commented config template (refuses to clobber an existing one)."""
+    """Write the commented providers/models templates (refuses to clobber)."""
     store = dm.store
-    if store.config_path.exists():
-        print(f"配置文件已存在: {store.config_path}")
+    if store.providers_path.exists():
+        print(f"配置文件已存在: {store.providers_path}")
         print("如需重新生成模板,请先备份并删除该文件,再运行 `llmport config init`。")
         return
     store.init_first_run(config_template=True)
-    print(f"已生成配置模板: {store.config_path}")
-    print("编辑该文件填入供应商和模型,然后运行 `llmport start`。")
-    print("API key 不写进 config.yaml,用 `llmport provider add` 单独明文存储。")
+    print("已生成配置模板:")
+    print(f"  {store.providers_path}   (供应商 + gateway + API key)")
+    print(f"  {store.models_path}      (模型映射)")
+    print("编辑这两个文件填入供应商和模型,然后运行 `llmport start`。")
+    print("API key 直接写在 providers.yaml 的 provider 条目里(用 `llmport provider add` 更省事)。")
 
 
 def _config_show(dm: DaemonManager) -> None:
-    """Print config.yaml contents (no secrets live there) + key-status notes."""
+    """Print providers.yaml (api_key masked) + models.yaml + key-status notes."""
+    import re
+
     store = dm.store
-    if not store.config_path.exists():
+    if not store.providers_path.exists():
         print("尚无配置文件。运行 `llmport config init` 生成模板。")
         return
-    text = store.config_path.read_text(encoding="utf-8")
-    print(text, end="" if text.endswith("\n") else "\n")
 
-    # Best-effort: annotate which providers have a key in the vault. The config
-    # file itself never holds keys, so this is the only way to see key status.
+    print(f"# === {store.providers_path.name} (api_key 已打码) ===")
+    text = store.providers_path.read_text(encoding="utf-8")
+    masked = re.sub(r"(api_key:\s*).+", r"\1***", text)
+    print(masked, end="" if masked.endswith("\n") else "\n")
+
+    if store.models_path.exists():
+        print()
+        print(f"# === {store.models_path.name} ===")
+        mtext = store.models_path.read_text(encoding="utf-8")
+        print(mtext, end="" if mtext.endswith("\n") else "\n")
+
+    # Best-effort: annotate which providers have a key set. The key lives in
+    # providers.yaml (masked above); this summarizes its presence per provider.
     try:
-        cfg = store.load_config()
+        pdata = store.load_providers_config()
     except Exception:
         return
-    providers = cfg.get("providers", []) if isinstance(cfg, dict) else []
+    providers = pdata.get("providers", []) if isinstance(pdata, dict) else []
     if not providers:
         return
-    try:
-        secrets = store.load_secrets()
-    except Exception:
-        secrets = {}
     print()
-    print("# API key 状态（key 存在 secrets.yaml,不在上面的文件里）:")
+    print("# API key 状态:")
     for p in providers:
         pid = p.get("id", "")
-        status = "已设置" if secrets.get(pid) else "未设置"
+        status = "已设置" if p.get("api_key") else "未设置"
         print(f"#   {pid}: {status}")
 
 
-def _config_edit(dm: DaemonManager) -> None:
-    """Open config.yaml in $EDITOR (default vi)."""
+def _config_edit(dm: DaemonManager, target: str = "providers") -> None:
+    """Open providers.yaml (or models.yaml) in $EDITOR (default vi)."""
     store = dm.store
-    if not store.config_path.exists():
+    path = store.models_path if target == "models" else store.providers_path
+    if not path.exists():
         print("尚无配置文件。运行 `llmport config init` 生成模板。")
         return
     editor = os.environ.get("EDITOR") or "vi"
-    subprocess.call([editor, str(store.config_path)])
+    subprocess.call([editor, str(path)])
 
 
 # ============================================================================
@@ -508,18 +540,22 @@ def _config_edit(dm: DaemonManager) -> None:
 # ============================================================================
 
 
-def _cmd_start(dm: DaemonManager) -> None:
+def _cmd_start(dm: DaemonManager, host: str | None = None, port: int | None = None) -> None:
     # Refuse to start with no providers configured.
-    cfg = _safe_load_config(dm.store)
-    if not cfg or not cfg.get("providers"):
+    pdata = _safe_load_providers(dm.store)
+    if not pdata or not pdata.get("providers"):
         print("尚未配置供应商。请先运行: llmport provider add --id <id>")
         return
-    for w in _validate_config(cfg):
+    for w in _validate_providers_config(pdata):
         print(f"警告: {w}")
+    mdata = _safe_load_models(dm.store)
+    if mdata:
+        for w in _validate_models_config(mdata):
+            print(f"警告: {w}")
     if dm.is_running():
         print(f"Gateway already running on {_url(dm)}")
         return
-    if dm.start():
+    if dm.start(host=host, port=port):
         print(f"Gateway started on {_url(dm)}")
         print("  /openai/v1/*    -> OpenAI protocol")
         print("  /anthropic/v1/* -> Anthropic protocol")
@@ -537,19 +573,19 @@ def _cmd_stop(dm: DaemonManager) -> None:
     print("Gateway stopped.")
 
 
-def _cmd_restart(dm: DaemonManager) -> None:
+def _cmd_restart(dm: DaemonManager, host: str | None = None, port: int | None = None) -> None:
     if dm.is_running():
-        if dm.restart():
+        if dm.restart(host=host, port=port):
             print(f"Gateway restarted on {_url(dm)}")
         else:
             print("Gateway failed to restart. Check that the configured port "
-                  "is free and config.yaml is valid.")
+                  "is free and providers.yaml is valid.")
     else:
-        if dm.start():
+        if dm.start(host=host, port=port):
             print(f"Gateway started on {_url(dm)}")
         else:
             print("Gateway failed to start. Check that the configured port "
-                  "is free and config.yaml is valid.")
+                  "is free and providers.yaml is valid.")
 
 
 def _cmd_status(dm: DaemonManager) -> None:
@@ -623,60 +659,86 @@ def _url(dm: DaemonManager) -> str:
     return "http://127.0.0.1:11434"
 
 
-def _safe_load_config(store) -> dict | None:
-    """Load config. Return None only if it doesn't exist yet.
+def _safe_load_providers(store) -> dict | None:
+    """Load providers config. Return None only if it doesn't exist yet.
 
-    A corrupt/unreadable config is NOT silently replaced with the default --
-    that would destroy the user's existing providers/models on the next
-    ``provider add`` / ``model add`` / ``setup``. Abort with a message instead
-    so the user can fix or back up the file.
+    A corrupt/unreadable file is NOT silently replaced with the default --
+    that would destroy the user's existing providers on the next
+    ``provider add`` / ``setup``. Abort with a message instead so the user
+    can fix or back up the file.
     """
     try:
-        return store.load_config()
+        return store.load_providers_config()
     except FileNotFoundError:
         return None
     except Exception as e:
-        # Corrupt YAML, or valid-YAML-but-not-a-dict (load_config raises
-        # ValueError for the latter). Refuse rather than fall back to the
-        # empty default, which would overwrite the user's existing config.
-        print(f"配置文件 {store.config_path} 无法解析: {e}")
+        # Corrupt YAML, or valid-YAML-but-not-a-dict (load_providers_config
+        # raises ValueError for the latter). Refuse rather than fall back to
+        # the empty default, which would overwrite the user's existing config.
+        print(f"配置文件 {store.providers_path} 无法解析: {e}")
         print("已中止,不会覆盖现有配置。请修复后重试,或备份后删除该文件重新配置。")
         raise SystemExit(1)
 
 
-def _validate_config(cfg) -> list[str]:
-    """Return human-readable warnings about malformed config entries.
+def _safe_load_models(store) -> dict | None:
+    """Load models config. Return None only if it doesn't exist yet.
 
-    The parser (``parse_models_config`` / ``ProviderConfig.from_dict``)
-    tolerates missing fields by skipping/degrading instead of crashing, so a
-    hand-edit typo can silently drop a model or leave a provider inert. This
-    surfaces such cases at ``llmport start`` time -- in the user's terminal,
-    not the detached daemon's discarded stderr.
+    A corrupt file aborts rather than being silently replaced.
     """
-    if not isinstance(cfg, dict):
+    try:
+        return store.load_models_config()
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"配置文件 {store.models_path} 无法解析: {e}")
+        print("已中止,不会覆盖现有配置。请修复后重试,或备份后删除该文件重新配置。")
+        raise SystemExit(1)
+
+
+def _validate_providers_config(pdata) -> list[str]:
+    """Return human-readable warnings about malformed provider entries.
+
+    The parser (``ProviderConfig.from_dict``) tolerates missing fields by
+    degrading instead of crashing, so a hand-edit typo can leave a provider
+    inert. This surfaces such cases at ``llmport start`` time -- in the
+    user's terminal, not the detached daemon's discarded stderr.
+    """
+    if not isinstance(pdata, dict):
         return []
-    from llmport.models.model import parse_models_config
     from llmport.config.validation import validate_provider_base_url
 
-    gw = cfg.get("gateway") or {}
+    gw = pdata.get("gateway") or {}
     gw_host = gw.get("host", "127.0.0.1")
     gw_port = int(gw.get("port", 11434))
 
     warnings: list[str] = []
-    for p in cfg.get("providers", []):
+    for p in pdata.get("providers", []):
         if not p.get("id"):
             warnings.append("供应商条目缺少 id 字段，将被忽略")
         elif not p.get("base_url"):
             warnings.append(f"供应商 {p['id']} 缺少 base_url，无法转发")
         else:
             try:
-                validate_provider_base_url(
-                    p["base_url"], gw_host, gw_port)
+                validate_provider_base_url(p["base_url"], gw_host, gw_port)
             except ValueError as e:
                 warnings.append(
                     f"供应商 {p['id']} 的 base_url 被拒绝（运行时跳过）: {e}")
-    parsed_names = {m.name for m in parse_models_config(cfg.get("models", []))}
-    for m in cfg.get("models", []):
+    return warnings
+
+
+def _validate_models_config(mdata) -> list[str]:
+    """Return human-readable warnings about malformed model bindings.
+
+    ``parse_models_config`` tolerates missing fields by skipping, so a
+    hand-edit typo can silently drop a model. This surfaces it at start time.
+    """
+    if not isinstance(mdata, dict):
+        return []
+    from llmport.models.model import parse_models_config
+
+    parsed_names = {m.name for m in parse_models_config(mdata.get("models", []))}
+    warnings: list[str] = []
+    for m in mdata.get("models", []):
         name = m.get("name") or m.get("id")
         if name and name not in parsed_names:
             warnings.append(

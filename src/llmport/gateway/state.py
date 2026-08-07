@@ -22,21 +22,20 @@ class GatewayState:
         self.reload()
 
     def reload(self) -> None:
-        """Reload config and secrets from disk.
+        """Reload providers and models from disk.
 
-        Providers are built from ``config.yaml`` with their API keys injected
-        from the plaintext ``secrets.yaml`` vault. Models are parsed from the
-        ``models`` section.
+        Providers (with their ``api_key``) come from ``providers.yaml``;
+        models come from ``models.yaml``. A provider whose ``base_url`` is an
+        SSRF risk (hand-edited) is marked "down" so the router skips it.
         """
-        data = self.store.load_config()
+        data = self.store.load_providers_config()
         self.gateway = data.get("gateway") or {"host": "127.0.0.1", "port": 11434}
-        secrets = self.store.load_secrets()
 
         self.providers = [
             ProviderConfig.from_dict(p) for p in data.get("providers", [])
         ]
-        for p in self.providers:
-            p.api_key = secrets.get(p.id, "")
+        # api_key lives inside each provider dict (from_dict reads it); no
+        # separate secrets vault to inject from.
 
         # Defense-in-depth for hand-edited configs: a provider whose base_url
         # is an SSRF risk (metadata / self-loop) is marked "down" so the router
@@ -52,7 +51,8 @@ class GatewayState:
             except ValueError:
                 p.health.status = "down"
 
-        self.models = parse_models_config(data.get("models", []))
+        mdata = self.store.load_models_config()
+        self.models = parse_models_config(mdata.get("models", []))
 
     def get_router(self) -> Router:
         return Router(self.providers, self.models)
@@ -75,17 +75,3 @@ def get_state() -> GatewayState:
     """
     assert STATE is not None
     return STATE
-
-
-def migrate_gateway_config(data: dict) -> dict:
-    """Return the canonical ``{"host", "port"}`` gateway dict from a config dict.
-
-    Kept as a thin shim for callers that still normalize a loaded config dict.
-    """
-    gw = data.get("gateway") or {}
-    if "host" not in gw:
-        gw = {
-            "host": "127.0.0.1",
-            "port": gw.get("openai_port", gw.get("anthropic_port", 11434)),
-        }
-    return {"host": gw.get("host", "127.0.0.1"), "port": int(gw.get("port", 11434))}

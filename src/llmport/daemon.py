@@ -34,6 +34,39 @@ def _loopback_host(host: str) -> str:
     return host if host in _LOOPBACK_HOSTS else "127.0.0.1"
 
 
+def resolve_gateway(store, cli_host: str | None = None,
+                    cli_port: int | None = None) -> dict:
+    """Resolve gateway ``{"host", "port"}``: CLI args > providers.yaml > default.
+
+    The caller (``run_daemon``) forces the host to loopback afterwards. No
+    environment-variable layer -- gateway is configured via the CLI
+    (``llmport start --host/--port``) or the ``gateway:`` section of
+    ``providers.yaml``.
+    """
+    gw = store.load_gateway()  # {host, port} from providers.yaml or default
+    host = cli_host if cli_host else gw["host"]
+    port = cli_port if cli_port else gw["port"]
+    return {"host": host, "port": int(port)}
+
+
+def _argv_flag_value(flag: str) -> str | None:
+    """Return the value following *flag* in ``sys.argv``.
+
+    Supports ``--flag value`` and ``--flag=value``. Used by ``run_daemon`` to
+    pick up ``--host``/``--port`` that ``llmport start`` passes to the daemon
+    subprocess -- the eager ``--daemon`` callback exits before Typer binds
+    them, so argv is read directly.
+    """
+    import sys
+    args = sys.argv
+    for i, a in enumerate(args):
+        if a == flag and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
 class DaemonManager:
     """Manages the gateway daemon process lifecycle."""
 
@@ -60,8 +93,7 @@ class DaemonManager:
         if port:
             return int(port)
         try:
-            gw = self.store.load_config().get("gateway") or {}
-            return int(gw.get("port", DEFAULT_PORT))
+            return int(self.store.load_gateway()["port"])
         except Exception:
             return DEFAULT_PORT
 
@@ -118,16 +150,22 @@ class DaemonManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self) -> bool:
+    def start(self, host: str | None = None, port: int | None = None) -> bool:
         """Start the daemon as a background subprocess and wait until ready.
 
-        Returns True if the gateway answered ``/api/status`` within the
-        startup timeout, False otherwise.
+        ``host``/``port`` (from ``llmport start --host/--port``) override the
+        ``gateway:`` section of ``providers.yaml`` for this run; they are
+        passed to the daemon subprocess on its argv. Returns True if the
+        gateway answered ``/api/status`` within the startup timeout.
         """
         if self.is_running():
             return True
-        self.store.init_first_run()  # ensure config + run any migration
+        self.store.init_first_run()
         cmd = [sys.executable, "-m", "llmport", "--daemon"]
+        if host:
+            cmd += ["--host", host]
+        if port is not None:
+            cmd += ["--port", str(port)]
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -135,13 +173,13 @@ class DaemonManager:
             start_new_session=True,  # detach from the caller
         )
         # Wait for the gateway to answer on its port.
-        port = self._gateway_port()
+        wait_port = port if port is not None else self._gateway_port()
         deadline = time.monotonic() + _START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
                 with httpx.Client(timeout=1.0) as client:
                     if client.get(
-                        f"http://127.0.0.1:{port}/api/status"
+                        f"http://127.0.0.1:{wait_port}/api/status"
                     ).status_code == 200:
                         # Confirm it is OUR daemon (PID file present + alive),
                         # not another process squatting on the port.
@@ -186,11 +224,11 @@ class DaemonManager:
         self._wait_for_exit(pid, 2.0)
         self._cleanup_pid()
 
-    def restart(self) -> bool:
+    def restart(self, host: str | None = None, port: int | None = None) -> bool:
         """Restart the daemon. Returns True if it came back up."""
         self.stop()
         time.sleep(0.5)
-        return self.start()
+        return self.start(host=host, port=port)
 
     # ------------------------------------------------------------------
     # Internal
@@ -215,23 +253,33 @@ class DaemonManager:
                 pass
 
 
-def run_daemon() -> None:
+def run_daemon(host: str | None = None, port: int | None = None) -> None:
     """Entry point for daemon mode (``llmport --daemon``).
 
-    Runs a single uvicorn server on the configured loopback host/port. The
-    PID file is written so the CLI's status/stop commands work, and removed
-    on exit.
+    Runs a single uvicorn server on the configured loopback host/port. Gateway
+    host/port resolution: CLI args (``host``/``port``) > ``providers.yaml`` >
+    default; the host is always forced to loopback. The PID file is written so
+    the CLI's status/stop commands work, and removed on exit.
     """
     import uvicorn
 
     from llmport.gateway.server import create_app
     from llmport.gateway import control_api
-    from llmport.gateway.state import migrate_gateway_config
 
     store = ConfigStore()
-    store.init_first_run()  # handles first-run create + legacy migration
+    store.init_first_run()
 
-    gw = migrate_gateway_config(store.load_config())
+    # In production, host/port arrive on the daemon subprocess argv
+    # (`llmport --daemon --host X --port Y`, set by `llmport start`). The
+    # eager --daemon callback exits before Typer binds them, so read argv
+    # directly. Tests pass host/port explicitly.
+    if host is None:
+        host = _argv_flag_value("--host")
+    if port is None:
+        p = _argv_flag_value("--port")
+        port = int(p) if p else None
+
+    gw = resolve_gateway(store, host, port)
     host = _loopback_host(gw["host"])
     port = gw["port"]
 
