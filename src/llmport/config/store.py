@@ -1,16 +1,24 @@
-"""Config store: two role-split files under ``~/.config/llmport/``.
+"""Config store: two files under ``~/.config/llmport/``, split by secrecy.
 
 Layout::
 
-    providers.yaml   # gateway + providers (WITH api_key), 0600
-    models.yaml      # public-name -> provider model mappings, 0600
+    config.yaml       # gateway + models (NO secrets), 0644, committable
+    providers.yaml    # providers (WITH api_key), 0600
+
+The split follows the secret boundary: only ``providers.yaml`` holds secrets,
+so only it is locked down (0600). ``config.yaml`` carries the gateway listen
+address and the public-name -> provider model mappings -- nothing sensitive --
+so it stays 0644 and can be version-controlled or shared. (The config dir
+itself is 0700, so a 0644 file is still owner-only in practice; 0644 is the
+*signal* that the file is non-secret.)
 
 Providers are self-contained: ``base_url`` and ``api_key`` live together in
-``providers.yaml`` so ``llmport provider test`` only needs that one file. The
-providers file holds secrets (0600); ``models.yaml`` carries no keys.
+``providers.yaml`` so ``llmport provider test`` only needs that one file.
 
-Legacy single-file ``config.yaml`` + ``secrets.yaml`` from the old layout are
-deleted on init -- the new code only reads the two files above.
+Legacy ``secrets.yaml`` from the old vault layout is deleted on init. An
+ancient single-file ``config.yaml`` (one containing a ``providers`` key) is
+backed up to ``config.yaml.bak`` rather than misread as the new non-secret
+config -- see :meth:`_migrate_layout`.
 """
 
 import os
@@ -20,15 +28,41 @@ import yaml
 
 DEFAULT_GATEWAY = {"host": "127.0.0.1", "port": 11434}
 
-# First-run providers.yaml template. Commented examples guide the user; the
-# real config stays empty so the gateway starts clean. Parsed as
-# {version, gateway, providers: []} (comments are ignored).
-_PROVIDERS_TEMPLATE = """\
-# llmport 供应商配置 (含 API key, 0600, 勿提交/分享)
+# First-run config.yaml template (non-secret: gateway + models). Commented
+# examples guide the user; the real config stays empty so the gateway starts
+# clean. Parsed as {version, gateway, models: {}} (comments are ignored).
+_CONFIG_TEMPLATE = """\
+# llmport 配置 (非敏感: 网关地址 + 模型映射, 0644, 可提交/分享)
 # 改完重启生效: llmport restart
 #
 # gateway: 网关监听地址。始终强制回环(0.0.0.0 等会被改为 127.0.0.1);
 #   也可用 `llmport start --host/--port` 覆盖(优先级: CLI > 此文件 > 默认)。
+#
+# models: 公开名 -> 供应商映射。key 是客户端请求时填的 model 名。
+#   upstream 缺省 = 公开名;多供应商/多 upstream 按顺序 fallback。
+#
+# models: {}   # 下面是示例,去掉行首 # 启用
+#   claude-sonnet: anthropic                 # 无别名单供应商
+#   gpt-4o:                                   # 无别名多供应商(顺序=优先级)
+#     - openai
+#     - azure
+#   sonnet:                                   # 有别名,供应商后接单个模型名
+#     - anthropic: claude-sonnet-4
+#   gpt4:                                     # 供应商后接列表(依次 fallback)
+#     - openai: gpt-4
+#     - azure: [gpt4o-deploy, gpt4o-turbo]
+
+version: 1
+gateway:
+  host: 127.0.0.1
+  port: 11434
+models: {}
+"""
+
+# First-run providers.yaml template (secrets: providers + api_key).
+_PROVIDERS_TEMPLATE = """\
+# llmport 供应商配置 (含 API key, 0600, 勿提交/分享)
+# 改完重启生效: llmport restart
 #
 # providers: 供应商连接信息 + API key,自包含。
 #   name: 供应商标识(模型映射里用此名引用),如 anthropic
@@ -46,37 +80,12 @@ _PROVIDERS_TEMPLATE = """\
 #     base_url: https://api.openai.com
 #     api_key: sk-xxxxx
 
-version: 1
-gateway:
-  host: 127.0.0.1
-  port: 11434
 providers: []
 """
 
-# First-run models.yaml template.
-_MODELS_TEMPLATE = """\
-# llmport 模型映射 (公开名 -> 供应商)
-# 改完重启生效: llmport restart
-#
-# key 是客户端请求时填的 model 名,映射到供应商。
-# upstream 缺省 = 公开名;多供应商/多 upstream 按顺序 fallback。
-#
-#   claude-sonnet: anthropic                 # 无别名单供应商
-#   gpt-4o:                                   # 无别名多供应商(顺序=优先级)
-#     - openai
-#     - azure
-#   sonnet:                                   # 有别名,供应商后接单个模型名
-#     - anthropic: claude-sonnet-4
-#   gpt4:                                     # 供应商后接列表(依次 fallback)
-#     - openai: gpt-4
-#     - azure: [gpt4o-deploy, gpt4o-turbo]
-
-models: {}
-"""
-
-# Files from the old single-file layout; deleted on init since the new code
-# never reads them.
-_LEGACY_FILES = ("config.yaml", "secrets.yaml")
+# Files from the old vault layout; deleted on init since the new code never
+# reads them. (config.yaml is NOT here -- it is the real non-secret config.)
+_LEGACY_FILES = ("secrets.yaml",)
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -101,7 +110,7 @@ def _chmod(path: Path, mode: int) -> None:
 
 
 class ConfigStore:
-    """Persists the role-split providers and models config files."""
+    """Persists the secret-split config and providers files."""
 
     def __init__(self, config_dir: str | None = None):
         if config_dir:
@@ -109,8 +118,8 @@ class ConfigStore:
         else:
             xdg = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
             self.dir = Path(xdg) / "llmport"
+        self.config_path = self.dir / "config.yaml"
         self.providers_path = self.dir / "providers.yaml"
-        self.models_path = self.dir / "models.yaml"
 
     # ------------------------------------------------------------------
     # First-run
@@ -121,31 +130,102 @@ class ConfigStore:
 
         When *config_template* is True, write the commented templates (for
         ``llmport setup`` / ``config init``) instead of the bare defaults used
-        by the daemon start path. Legacy ``config.yaml`` / ``secrets.yaml``
-        from the old single-file layout are deleted -- the new code only reads
-        ``providers.yaml`` / ``models.yaml``.
+        by the daemon start path. Migrates the prior two-file layout
+        (``providers.yaml`` with gateway + ``models.yaml``) into the current
+        ``config.yaml`` + ``providers.yaml`` split first, then fills in any
+        missing file. Legacy ``secrets.yaml`` is deleted.
         """
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+        self.migrate_layout()
+
+        if not self.config_path.exists():
+            if config_template:
+                self.write_config_template()
+            else:
+                self.save_config({
+                    "version": 1,
+                    "gateway": dict(DEFAULT_GATEWAY),
+                    "models": {},
+                })
         if not self.providers_path.exists():
             if config_template:
                 self.write_providers_template()
             else:
-                self.save_providers_config({
-                    "version": 1,
-                    "gateway": dict(DEFAULT_GATEWAY),
-                    "providers": [],
-                })
-        if not self.models_path.exists():
-            if config_template:
-                self.write_models_template()
-            else:
-                self.save_models_config({"models": {}})
+                self.save_providers_config({"providers": []})
 
         self._cleanup_legacy_files()
 
+    def migrate_layout(self) -> None:
+        """Migrate the prior layout to the current config.yaml + providers.yaml
+        split.
+
+        Prior two-file layout (``providers.yaml`` holding gateway + ``models.yaml``)
+        -> lift gateway/version out of providers.yaml and models out of
+        models.yaml into a new non-secret ``config.yaml``; rewrite
+        providers.yaml to ``{providers}`` only; delete ``models.yaml``.
+        Idempotent -- a no-op once ``config.yaml`` exists in the new shape, and
+        a no-op on a fresh install (nothing to migrate).
+
+        An ancient single-file ``config.yaml`` (one containing a ``providers``
+        key, from before the two-file split) is backed up to
+        ``config.yaml.bak`` rather than misread as the new non-secret config;
+        its contents are not auto-migrated (the prior commits already moved
+        those installs to the two-file layout).
+        """
+        if self.config_path.exists():
+            try:
+                existing = yaml.safe_load(self.config_path.read_bytes()) or {}
+            except Exception:
+                existing = {}
+            if isinstance(existing, dict) and "providers" in existing:
+                # Ancient single-file layout; back it up, fall through.
+                try:
+                    os.replace(
+                        self.config_path,
+                        self.config_path.with_suffix(".yaml.bak"),
+                    )
+                except OSError:
+                    pass
+            else:
+                return  # already new-shape config.yaml
+
+        providers_existed = self.providers_path.exists()
+        models_existed = self.dir.joinpath("models.yaml").exists()
+        if not (providers_existed or models_existed):
+            return  # fresh install; init_first_run lays down defaults
+
+        cfg = {"version": 1, "gateway": dict(DEFAULT_GATEWAY), "models": {}}
+        if providers_existed:
+            try:
+                pdata = yaml.safe_load(self.providers_path.read_bytes()) or {}
+            except Exception:
+                pdata = {}
+            if isinstance(pdata, dict):
+                if pdata.get("gateway"):
+                    cfg["gateway"] = pdata["gateway"]
+                if pdata.get("version") is not None:
+                    cfg["version"] = pdata["version"]
+                # Strip providers.yaml to {providers} only; re-validate the
+                # base_urls against the migrated gateway.
+                self.save_providers_config(
+                    {"providers": pdata.get("providers", [])}, cfg["gateway"])
+        if models_existed:
+            models_path = self.dir / "models.yaml"
+            try:
+                mdata = yaml.safe_load(models_path.read_bytes()) or {}
+            except Exception:
+                mdata = {}
+            if isinstance(mdata, dict) and isinstance(mdata.get("models"), dict):
+                cfg["models"] = mdata["models"]
+            try:
+                models_path.unlink()
+            except OSError:
+                pass
+        self.save_config(cfg)
+
     def _cleanup_legacy_files(self) -> None:
-        """Delete legacy ``config.yaml`` / ``secrets.yaml`` from the old layout."""
+        """Delete legacy ``secrets.yaml`` from the old vault layout."""
         for name in _LEGACY_FILES:
             p = self.dir / name
             if p.exists():
@@ -155,11 +235,50 @@ class ConfigStore:
                     pass
 
     # ------------------------------------------------------------------
-    # providers.yaml (gateway + providers, WITH api_key)
+    # config.yaml (gateway + models, NON-secret, 0644)
+    # ------------------------------------------------------------------
+
+    def load_config(self) -> dict:
+        """Load and return the non-secret config (``{version, gateway, models}``).
+
+        Raises ``FileNotFoundError`` if the file does not exist yet, and
+        ``ValueError`` if it is valid YAML but not a mapping, so callers can
+        abort cleanly instead of crashing on ``.get()``.
+        """
+        if not self.config_path.exists():
+            raise FileNotFoundError(self.config_path)
+        data = yaml.safe_load(self.config_path.read_bytes())
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"config.yaml 顶层必须是字典，得到 {type(data).__name__}"
+            )
+        return data
+
+    def save_config(self, data: dict) -> None:
+        """Write the non-secret config (0644)."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        plaintext = yaml.dump(
+            data, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
+        _atomic_write_bytes(self.config_path, plaintext.encode("utf-8"))
+        _chmod(self.config_path, 0o644)
+        _chmod(self.dir, 0o700)
+
+    def write_config_template(self) -> None:
+        """Write the first-run config.yaml with commented examples."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(
+            self.config_path, _CONFIG_TEMPLATE.encode("utf-8"))
+        _chmod(self.config_path, 0o644)
+
+    # ------------------------------------------------------------------
+    # providers.yaml (providers WITH api_key, 0600)
     # ------------------------------------------------------------------
 
     def load_providers_config(self) -> dict:
-        """Load and return the providers config (gateway + providers + keys).
+        """Load and return the providers config (providers + keys).
 
         Raises ``FileNotFoundError`` if the file does not exist yet, and
         ``ValueError`` if it is valid YAML but not a mapping (e.g. a top-level
@@ -177,15 +296,19 @@ class ConfigStore:
             )
         return data
 
-    def save_providers_config(self, data: dict) -> None:
-        """Write the providers config (gateway + providers + keys, 0600).
+    def save_providers_config(self, data: dict, gateway: dict | None = None) -> None:
+        """Write the providers config (providers + keys, 0600).
 
         Validates provider base_urls against the SSRF blocklist (see
         :mod:`llmport.config.validation`) so every write path -- CLI and any
-        future config editor -- is guarded from one place.
+        future config editor -- is guarded from one place. *gateway* supplies
+        the host:port for the self-loop check; when omitted it is read from
+        ``config.yaml`` (defaulting to ``127.0.0.1:11434`` if absent).
         """
         from llmport.config.validation import validate_providers_config
-        validate_providers_config(data)
+        if gateway is None:
+            gateway = self.load_gateway()
+        validate_providers_config(data, gateway)
         self.dir.mkdir(parents=True, exist_ok=True)
         plaintext = yaml.dump(
             data, default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -202,40 +325,34 @@ class ConfigStore:
         _chmod(self.providers_path, 0o600)
 
     # ------------------------------------------------------------------
-    # models.yaml (public-name -> provider model mappings)
+    # models convenience (lives in config.yaml's ``models`` section)
     # ------------------------------------------------------------------
 
     def load_models_config(self) -> dict:
-        """Load and return the models config (``{models: {...}}``).
+        """Load and return ``{"models": {...}}`` from ``config.yaml``.
 
-        Returns ``{}`` if the file does not exist yet (models are optional at
-        first run). Raises ``ValueError`` if it is valid YAML but not a
-        mapping.
+        Returns ``{"models": {}}`` if the file does not exist yet (models are
+        optional at first run). Raises ``ValueError`` if ``config.yaml`` is
+        valid YAML but not a mapping.
         """
-        if not self.models_path.exists():
-            return {}
-        data = yaml.safe_load(self.models_path.read_bytes()) or {}
-        if not isinstance(data, dict):
-            raise ValueError(
-                f"models.yaml 顶层必须是字典，得到 {type(data).__name__}"
-            )
-        return data
+        try:
+            data = self.load_config()
+        except FileNotFoundError:
+            return {"models": {}}
+        return {"models": data.get("models") or {}}
 
     def save_models_config(self, data: dict) -> None:
-        """Write the models config (0600)."""
-        self.dir.mkdir(parents=True, exist_ok=True)
-        plaintext = yaml.dump(
-            data, default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
-        _atomic_write_bytes(self.models_path, plaintext.encode("utf-8"))
-        _chmod(self.models_path, 0o600)
-        _chmod(self.dir, 0o700)
+        """Write the ``models`` section of ``config.yaml`` (0644).
 
-    def write_models_template(self) -> None:
-        """Write the first-run models.yaml with commented examples."""
-        self.dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(self.models_path, _MODELS_TEMPLATE.encode("utf-8"))
-        _chmod(self.models_path, 0o600)
+        Preserves the existing gateway/version; only the ``models`` key is
+        replaced. Creates ``config.yaml`` with defaults if it does not exist.
+        """
+        try:
+            cfg = self.load_config()
+        except FileNotFoundError:
+            cfg = {"version": 1, "gateway": dict(DEFAULT_GATEWAY), "models": {}}
+        cfg["models"] = data.get("models", {})
+        self.save_config(cfg)
 
     # ------------------------------------------------------------------
     # gateway convenience
@@ -244,12 +361,12 @@ class ConfigStore:
     def load_gateway(self) -> dict:
         """Return the canonical ``{"host", "port"}`` gateway dict.
 
-        Read from ``providers.yaml``'s ``gateway`` section; falls back to the
+        Read from ``config.yaml``'s ``gateway`` section; falls back to the
         default (``127.0.0.1:11434``) if the file is missing or unreadable so
         gateway resolution never crashes the daemon.
         """
         try:
-            data = self.load_providers_config()
+            data = self.load_config()
         except (FileNotFoundError, ValueError):
             return dict(DEFAULT_GATEWAY)
         gw = data.get("gateway") or {}

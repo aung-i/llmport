@@ -108,14 +108,19 @@ def validate_provider_base_url(
             )
 
 
-def validate_providers_config(cfg: dict) -> None:
+def validate_providers_config(cfg: dict, gateway: dict | None = None) -> None:
     """Validate every provider base_url in *cfg*. Raises ``ValueError``.
+
+    *gateway* (``{"host", "port"}``) supplies the gateway address for the
+    self-loop check; it defaults to ``127.0.0.1:11434``. Gateway lives in
+    ``config.yaml`` now, not alongside providers, so callers pass it in -- the
+    store's ``save_providers_config`` does this automatically.
 
     No-op for non-dict input or configs without providers.
     """
     if not isinstance(cfg, dict):
         return
-    gw = cfg.get("gateway") or {}
+    gw = gateway or {}
     gw_host = gw.get("host", "127.0.0.1")
     gw_port = int(gw.get("port", 11434))
     for p in cfg.get("providers", []) or []:

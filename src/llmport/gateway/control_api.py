@@ -2,11 +2,11 @@
 
 Only read-only status and lifecycle endpoints are mounted under ``/api/*``.
 Configuration (providers / models / gateway host+port) is managed via the CLI,
-which writes ``providers.yaml`` + ``models.yaml`` and restarts the daemon; the
-write/test/fetch endpoints were removed to close the programmatic SSRF entry
-(arbitrary ``base_url`` injection or fetch at runtime). See
-``llmport.config.validation`` for the base_url blocklist that guards the CLI
-write path.
+which writes ``config.yaml`` (gateway + models) and ``providers.yaml`` (API
+keys) and restarts the daemon; the write/test/fetch endpoints were removed to
+close the programmatic SSRF entry (arbitrary ``base_url`` injection or fetch
+at runtime). See ``llmport.config.validation`` for the base_url blocklist that
+guards the CLI write path.
 """
 
 import time

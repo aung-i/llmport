@@ -97,30 +97,29 @@ def test_rejects_malformed_urls(url):
 # ── validate_providers_config ──────────────────────────────────────────────────────
 
 def test_validate_providers_config_passes_clean_providers():
-    validate_providers_config({
-        "gateway": {"host": "127.0.0.1", "port": 11434},
-        "providers": [{"name": "p", "base_url": "https://api.openai.com"}],
-    })  # no raise
+    gw = {"host": "127.0.0.1", "port": 11434}
+    validate_providers_config(
+        {"providers": [{"name": "p", "base_url": "https://api.openai.com"}]},
+        gw,
+    )  # no raise
 
 
 def test_validate_providers_config_rejects_bad_provider():
+    gw = {"host": "127.0.0.1", "port": 11434}
     with pytest.raises(ValueError, match="SSRF"):
-        validate_providers_config({
-            "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [
-                {"name": "p", "base_url": "http://169.254.169.254"},
-            ],
-        })
+        validate_providers_config(
+            {"providers": [{"name": "p", "base_url": "http://169.254.169.254"}]},
+            gw,
+        )
 
 
 def test_validate_providers_config_rejects_self_loop_provider():
+    gw = {"host": "127.0.0.1", "port": 11434}
     with pytest.raises(ValueError, match="请求循环"):
-        validate_providers_config({
-            "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [
-                {"name": "p", "base_url": "http://127.0.0.1:11434"},
-            ],
-        })
+        validate_providers_config(
+            {"providers": [{"name": "p", "base_url": "http://127.0.0.1:11434"}]},
+            gw,
+        )
 
 
 def test_validate_providers_config_noop_on_non_dict_or_empty():
@@ -155,20 +154,31 @@ def test_save_providers_config_rejects_metadata_base_url(tmp_path):
     store = ConfigStore(str(tmp_path / "llmport"))
     store.init_first_run()
     with pytest.raises(ValueError, match="SSRF"):
-        store.save_providers_config({
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [{"name": "p", "base_url": "http://169.254.169.254"}],
-        })
+        store.save_providers_config(
+            {"providers": [{"name": "p", "base_url": "http://169.254.169.254"}]})
 
 
 def test_save_providers_config_allows_local_base_url(tmp_path):
     from llmport.config.store import ConfigStore
     store = ConfigStore(str(tmp_path / "llmport"))
     store.init_first_run()
-    store.save_providers_config({
-        "version": 1,
-        "gateway": {"host": "127.0.0.1", "port": 11434},
-        "providers": [{"name": "p", "base_url": "http://127.0.0.1:11435"}],
-    })  # no raise
+    store.save_providers_config(
+        {"providers": [{"name": "p", "base_url": "http://127.0.0.1:11435"}]}
+    )  # no raise
+
+
+def test_save_providers_config_uses_config_gateway_for_self_loop(tmp_path):
+    """save_providers_config reads the gateway from config.yaml for the
+    self-loop check (not from the providers data)."""
+    from llmport.config.store import ConfigStore
+    store = ConfigStore(str(tmp_path / "llmport"))
+    store.init_first_run()
+    # Custom gateway port in config.yaml.
+    cfg = store.load_config()
+    cfg["gateway"] = {"host": "127.0.0.1", "port": 22000}
+    store.save_config(cfg)
+    with pytest.raises(ValueError, match="请求循环"):
+        # base_url pointing at the configured gateway port -> self-loop.
+        store.save_providers_config(
+            {"providers": [{"name": "p", "base_url": "http://127.0.0.1:22000"}]})
 

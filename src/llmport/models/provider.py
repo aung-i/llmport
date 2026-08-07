@@ -15,9 +15,10 @@ class ProviderHealth:
 class ProviderConfig:
     """Configuration for an LLM provider - connection info only.
 
-    Model routing lives in ``models.yaml``, not here. ``api_key`` is stored
-    alongside ``base_url`` in ``providers.yaml`` (self-contained) and read
-    directly by ``from_dict`` -- there is no separate secrets vault. ``name``
+    Model routing lives in ``config.yaml`` (the ``models:`` section), not here.
+    ``api_key`` is stored alongside ``base_url`` in ``providers.yaml``
+    (self-contained) and read directly by ``from_dict`` -- there is no
+    separate secrets vault. ``name``
     is the sole identity: it is both the slug referenced by model bindings
     and the display name.
     """

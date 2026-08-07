@@ -22,17 +22,24 @@ class GatewayState:
         self.reload()
 
     def reload(self) -> None:
-        """Reload providers and models from disk.
+        """Reload gateway/models/providers from disk.
 
-        Providers (with their ``api_key``) come from ``providers.yaml``;
-        models come from ``models.yaml``. A provider whose ``base_url`` is an
-        SSRF risk (hand-edited) is marked "down" so the router skips it.
+        Gateway + models come from the non-secret ``config.yaml``; providers
+        (with their ``api_key``) come from ``providers.yaml``. A missing
+        ``config.yaml`` degrades to the default gateway + no models (models
+        are optional); a missing ``providers.yaml`` raises. A provider whose
+        ``base_url`` is an SSRF risk (hand-edited) is marked "down" so the
+        router skips it.
         """
-        data = self.store.load_providers_config()
-        self.gateway = data.get("gateway") or {"host": "127.0.0.1", "port": 11434}
+        try:
+            cfg = self.store.load_config()
+        except FileNotFoundError:
+            cfg = {}
+        self.gateway = cfg.get("gateway") or {"host": "127.0.0.1", "port": 11434}
 
+        pdata = self.store.load_providers_config()
         self.providers = [
-            ProviderConfig.from_dict(p) for p in data.get("providers", [])
+            ProviderConfig.from_dict(p) for p in pdata.get("providers", [])
         ]
         # api_key lives inside each provider dict (from_dict reads it); no
         # separate secrets vault to inject from.
@@ -51,8 +58,7 @@ class GatewayState:
             except ValueError:
                 p.health.status = "down"
 
-        mdata = self.store.load_models_config()
-        self.models = parse_models_config(mdata.get("models", []))
+        self.models = parse_models_config(cfg.get("models", []))
 
     def get_router(self) -> Router:
         return Router(self.providers, self.models)

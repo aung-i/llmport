@@ -306,11 +306,9 @@ class TestGatewayPortFallback:
 
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
-        store.save_providers_config({
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 22000},
-            "providers": [],
-        })
+        cfg = store.load_config()
+        cfg["gateway"] = {"host": "127.0.0.1", "port": 22000}
+        store.save_config(cfg)
         dm = DaemonManager(config_dir=str(tmp_path))
         # No PID file -> port comes from providers.yaml.
         assert dm._gateway_port() == 22000
@@ -365,11 +363,9 @@ class TestResolveGateway:
 
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
-        store.save_providers_config({
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 22000},
-            "providers": [],
-        })
+        cfg = store.load_config()
+        cfg["gateway"] = {"host": "127.0.0.1", "port": 22000}
+        store.save_config(cfg)
         gw = resolve_gateway(store, cli_host=None, cli_port=33000)
         assert gw == {"host": "127.0.0.1", "port": 33000}
 
@@ -379,11 +375,9 @@ class TestResolveGateway:
 
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
-        store.save_providers_config({
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 22000},
-            "providers": [],
-        })
+        cfg = store.load_config()
+        cfg["gateway"] = {"host": "127.0.0.1", "port": 22000}
+        store.save_config(cfg)
         assert resolve_gateway(store) == {"host": "127.0.0.1", "port": 22000}
 
     def test_default_when_no_config(self, tmp_path):

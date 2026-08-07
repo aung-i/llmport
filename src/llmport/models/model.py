@@ -71,7 +71,7 @@ def parse_models_config(models_data) -> list[LogicalModel]:
 
 
 def _normalize_bindings(value, name: str) -> list[ModelBinding]:
-    """Normalize a models.yaml value into ordered bindings.
+    """Normalize a config.yaml ``models:`` value into ordered bindings.
 
     ``name`` is the public model name, used as the default ``upstream``.
     """

@@ -83,7 +83,8 @@ def test_stray_legacy_config_enc_is_ignored():
         store.init_first_run()
 
         assert store.providers_path.exists()
-        assert store.models_path.exists()
+        assert store.config_path.exists()
+        assert not (store.dir / "models.yaml").exists()
         assert store.load_providers_config()["providers"] == []
 
 

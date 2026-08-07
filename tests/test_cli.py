@@ -114,20 +114,22 @@ class TestSetup:
     """The `llmport setup` command bootstraps files and points at next steps."""
 
     def test_setup_creates_providers_and_models(self, tmp_path, monkeypatch):
-        """setup lays down providers.yaml + models.yaml templates, no prompts."""
+        """setup lays down config.yaml + providers.yaml templates, no prompts."""
         from llmport.config.store import ConfigStore
 
         result = invoke(["llmport", "setup"], tmp_path, monkeypatch)
 
         store = ConfigStore(str(tmp_path / "llmport"))
-        # Template providers + models files created; legacy files absent.
+        # Template config + providers files created; no separate models.yaml.
+        ctext = (tmp_path / "llmport" / "config.yaml").read_text()
+        assert "gateway" in ctext
+        assert "models: {}" in ctext
         ptext = (tmp_path / "llmport" / "providers.yaml").read_text()
         assert "供应商" in ptext
         assert "providers: []" in ptext
-        assert (tmp_path / "llmport" / "models.yaml").exists()
+        assert not (tmp_path / "llmport" / "models.yaml").exists()
         assert store.load_providers_config()["providers"] == []
-        # No legacy single-file layout or Fernet key.
-        assert not (tmp_path / "llmport" / "config.yaml").exists()
+        # No legacy vault files.
         assert not (tmp_path / "llmport" / "secrets.yaml").exists()
         assert not (tmp_path / "llmport" / "key").exists()
         # Output points the user at the dedicated commands, not an inline wizard.
@@ -178,6 +180,35 @@ class TestStartGate:
             result = invoke(["llmport", "start"], tmp_path, monkeypatch)
             mock_dm.start.assert_called_once()
         assert "Gateway started" in result.stdout
+
+    def test_start_migrates_old_layout(self, tmp_path, monkeypatch):
+        """start migrates a prior two-file layout before reading, so models
+        configured in the old models.yaml are not silently dropped."""
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.dir.mkdir(parents=True, exist_ok=True)
+        # Old layout: gateway + providers in providers.yaml; models in models.yaml.
+        store.providers_path.write_text(
+            "version: 1\n"
+            "gateway: {host: 127.0.0.1, port: 11434}\n"
+            "providers:\n"
+            "  - name: p\n    protocol: openai\n"
+            "    base_url: https://api.example.com\n    api_key: sk\n")
+        (store.dir / "models.yaml").write_text("models: {m: p}\n")
+
+        # Patch methods (not the class) so dm.store stays a real ConfigStore
+        # pointed at the temp dir -- migration must touch real files.
+        with patch("llmport.cli.DaemonManager.is_running", return_value=False), \
+             patch("llmport.cli.DaemonManager.start", return_value=True), \
+             patch("llmport.cli.DaemonManager.get_control_port", return_value=11434):
+            invoke(["llmport", "start"], tmp_path, monkeypatch)
+
+        # Models lifted into config.yaml; models.yaml gone.
+        cfg = store.load_config()
+        assert cfg["models"] == {"m": "p"}
+        assert not (store.dir / "models.yaml").exists()
+        assert [p["name"] for p in store.load_providers_config()["providers"]] == ["p"]
 
     def test_validate_config_warns_on_malformed_entries(self):
         """_validate_providers_config / _validate_models_config surface missing
@@ -341,7 +372,8 @@ class TestConfigCommands:
         assert "api_key" in ptext
         # The OpenAI example must use the host root (no double /v1).
         assert "https://api.openai.com/v1" not in ptext
-        assert store.models_path.exists()
+        ctext = store.config_path.read_text(encoding="utf-8")
+        assert "models: {}" in ctext
         assert "已生成配置模板" in result.stdout
 
     def test_init_does_not_clobber(self, tmp_path, monkeypatch):
@@ -356,8 +388,8 @@ class TestConfigCommands:
 
     def test_path_prints_config_paths(self, tmp_path, monkeypatch):
         result = invoke(["llmport", "config", "path"], tmp_path, monkeypatch)
+        assert "config.yaml" in result.stdout
         assert "providers.yaml" in result.stdout
-        assert "models.yaml" in result.stdout
 
     def test_show_prints_content_and_key_status(self, tmp_path, monkeypatch):
         invoke(["llmport", "provider", "add", "--name", "p",
@@ -380,6 +412,19 @@ class TestConfigCommands:
         mock_call.assert_called_once()
         cmd = mock_call.call_args[0][0]
         assert cmd[0] == "myed"
+        # Default target is the non-secret config.yaml.
+        assert cmd[1].endswith("llmport/config.yaml")
+
+    def test_edit_providers_target(self, tmp_path, monkeypatch):
+        from llmport.config.store import ConfigStore
+
+        ConfigStore(str(tmp_path / "llmport")).init_first_run(config_template=True)
+        monkeypatch.setenv("EDITOR", "myed")
+        with patch("llmport.cli.subprocess.call") as mock_call:
+            invoke(["llmport", "config", "edit", "--target", "providers"],
+                   tmp_path, monkeypatch)
+        mock_call.assert_called_once()
+        cmd = mock_call.call_args[0][0]
         assert cmd[1].endswith("llmport/providers.yaml")
 
     def test_edit_without_file(self, tmp_path, monkeypatch):

@@ -293,7 +293,7 @@ class TestOpenaiModels:
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
-            # No models saved -> models.yaml defaults to empty.
+            # No models saved -> config.yaml models defaults to empty.
             app = gateway_server.create_app(store)
             client = TestClient(app)
             resp = client.get("/openai/v1/models")

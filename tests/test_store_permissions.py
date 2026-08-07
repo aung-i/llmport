@@ -2,7 +2,7 @@
 
 After save, the spec requires:
 - providers.yaml  -> permissions 0o600 (owner read/write only; holds api keys)
-- models.yaml     -> permissions 0o600 (owner read/write only)
+- config.yaml     -> permissions 0o644 (non-secret: gateway + models)
 - directory       -> permissions 0o700 (owner read/write/execute only)
 - Non-POSIX platforms where chmod is unsupported must not raise.
 """
@@ -20,11 +20,7 @@ def test_save_providers_config_sets_providers_yaml_to_600():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
-        store.save_providers_config({
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [],
-        })
+        store.save_providers_config({"providers": []})
 
         mode = stat.S_IMODE(os.stat(store.providers_path).st_mode)
         assert mode == 0o600, (
@@ -32,16 +28,16 @@ def test_save_providers_config_sets_providers_yaml_to_600():
         )
 
 
-def test_save_models_config_sets_models_yaml_to_600():
-    """After save_models_config(), models.yaml has permissions 0o600."""
+def test_save_models_config_sets_config_yaml_to_644():
+    """After save_models_config(), config.yaml has permissions 0o644 (non-secret)."""
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
         store.save_models_config({"models": {}})
 
-        mode = stat.S_IMODE(os.stat(store.models_path).st_mode)
-        assert mode == 0o600, (
-            f"Expected models.yaml permissions 0o600, got {oct(mode)}"
+        mode = stat.S_IMODE(os.stat(store.config_path).st_mode)
+        assert mode == 0o644, (
+            f"Expected config.yaml permissions 0o644, got {oct(mode)}"
         )
 
 
@@ -54,11 +50,7 @@ def test_save_providers_config_sets_directory_to_700():
         # Deliberately loosen directory permissions so we can verify the save
         # restores them.
         os.chmod(store.dir, 0o755)
-        store.save_providers_config({
-            "version": 1,
-            "gateway": {"host": "127.0.0.1", "port": 11434},
-            "providers": [],
-        })
+        store.save_providers_config({"providers": []})
 
         mode = stat.S_IMODE(os.stat(store.dir).st_mode)
         assert mode == 0o700, (
@@ -100,6 +92,5 @@ def test_non_posix_platform_does_not_raise():
 
         # Data must still be readable and intact.
         loaded = store.load_providers_config()
-        assert loaded["version"] == 1
         assert len(loaded["providers"]) == 1
         assert loaded["providers"][0]["api_key"] == "sk-test"

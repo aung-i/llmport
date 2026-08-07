@@ -36,14 +36,14 @@ def _loopback_host(host: str) -> str:
 
 def resolve_gateway(store, cli_host: str | None = None,
                     cli_port: int | None = None) -> dict:
-    """Resolve gateway ``{"host", "port"}``: CLI args > providers.yaml > default.
+    """Resolve gateway ``{"host", "port"}``: CLI args > config.yaml > default.
 
     The caller (``run_daemon``) forces the host to loopback afterwards. No
     environment-variable layer -- gateway is configured via the CLI
     (``llmport start --host/--port``) or the ``gateway:`` section of
-    ``providers.yaml``.
+    ``config.yaml``.
     """
-    gw = store.load_gateway()  # {host, port} from providers.yaml or default
+    gw = store.load_gateway()  # {host, port} from config.yaml or default
     host = cli_host if cli_host else gw["host"]
     port = cli_port if cli_port else gw["port"]
     return {"host": host, "port": int(port)}
