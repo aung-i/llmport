@@ -141,17 +141,22 @@ def test_daemon_manager_pid_file(tmp_path):
     """DaemonManager.is_running() reflects PID file state."""
     import json
     import os
+    from unittest.mock import patch
     from llmport.daemon import DaemonManager
 
     dm = DaemonManager(str(tmp_path))
     assert dm.is_running() is False
 
-    # Write a fake PID file with current PID
+    # Write a fake PID file with current PID; the pid is alive, and we pretend
+    # its command line is our daemon (is_running now identity-checks the cmdline
+    # so a recycled pid is never mistaken for our daemon).
     pid_path = tmp_path / "daemon.pid"
     pid_path.write_text(json.dumps({"pid": os.getpid(), "control_port": 12345}))
-    assert dm.is_running() is True
+    with patch.object(dm, "_process_cmdline",
+                      return_value="/p/python -m llmport --daemon"):
+        assert dm.is_running() is True
 
-    # Stale PID file (nonexistent process)
+    # Stale PID file (nonexistent process) -> not running, file cleared.
     pid_path.write_text(json.dumps({"pid": 99999, "control_port": 12345}))
     assert dm.is_running() is False
 

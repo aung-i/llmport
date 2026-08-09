@@ -97,20 +97,69 @@ class DaemonManager:
         except Exception:
             return DEFAULT_PORT
 
+    def _process_cmdline(self, pid: int) -> str | None:
+        """Return process *pid*'s command line, or None if it can't be read.
+
+        Uses ``ps`` (portable across macOS/Linux). None means the process is
+        dead or ``ps`` is unavailable -- callers fall back to liveness only.
+        """
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, timeout=3.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def _pid_is_our_daemon(self, pid: int) -> bool:
+        """True if *pid* is alive AND is our ``llmport --daemon`` process.
+
+        Verifies identity via the command line so a recycled pid owned by an
+        unrelated process is NOT mistaken for our daemon -- otherwise ``stop``
+        could signal (kill) the wrong process. If the command line can't be
+        read (``ps`` unavailable), falls back to trusting liveness alone: never
+        worse than the old ``os.kill``-only behavior.
+        """
+        try:
+            os.kill(pid, 0)
+        except (ValueError, OSError):
+            return False  # process is dead
+        cmdline = self._process_cmdline(pid)
+        if cmdline is None:
+            return True  # alive, but can't verify -> trust (fallback)
+        return "llmport" in cmdline and "--daemon" in cmdline
+
+    def _port_answers_health(self, port: int) -> bool:
+        """True if something answers ``/health`` with 200 on localhost:port."""
+        try:
+            with httpx.Client(timeout=1.0) as client:
+                return client.get(
+                    f"http://127.0.0.1:{port}/health"
+                ).status_code == 200
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # State
     # ------------------------------------------------------------------
 
     def is_running(self) -> bool:
-        """Check if the daemon is currently running."""
+        """Check if *our* daemon is currently running.
+
+        A pid that is dead (stale file) or recycled by an unrelated process is
+        treated as not running, and the stale pid file is cleared so later
+        commands don't act on a bogus pid.
+        """
         pid = self._read_pid_field("pid")
         if pid is None:
             return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ValueError, OSError):
+        if not self._pid_is_our_daemon(pid):
+            self._cleanup_pid()
             return False
+        return True
 
     def get_control_port(self) -> int | None:
         """Return the gateway/control port (single port) when running."""
@@ -165,6 +214,18 @@ class DaemonManager:
         if self.is_running():
             return True
         self.store.init_first_run()
+        wait_port = port if port is not None else self._gateway_port()
+        # Orphan guard: a daemon is already answering on the port but we have
+        # no valid pid for it (e.g. daemon.pid was manually deleted while the
+        # process kept running). Don't spawn a duplicate that can't bind --
+        # tell the user to free the port instead.
+        if self._port_answers_health(wait_port):
+            print(
+                f"端口 {wait_port} 已有进程响应 /health，但无有效 pid 文件"
+                f"（可能是孤儿 daemon）。未启动重复实例；请释放该端口或用"
+                f" --port 指定其它端口。"
+            )
+            return False
         cmd = [sys.executable, "-m", "llmport", "--daemon"]
         if host:
             cmd += ["--host", host]
@@ -177,7 +238,6 @@ class DaemonManager:
             start_new_session=True,  # detach from the caller
         )
         # Wait for the gateway to answer on its port.
-        wait_port = port if port is not None else self._gateway_port()
         deadline = time.monotonic() + _START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
@@ -198,10 +258,18 @@ class DaemonManager:
 
         Control is exercised over the process, not over HTTP, so no control
         surface rides on the forwarding port. uvicorn handles SIGTERM with a
-        graceful shutdown.
+        graceful shutdown. The pid is identity-checked first: a stale or
+        recycled pid is cleared without signaling, so an unrelated process can
+        never be killed by mistake.
         """
         pid = self._read_pid_field("pid")
         if pid is None:
+            self._cleanup_pid()
+            return
+
+        # Don't signal a pid that isn't ours (dead/stale, or recycled by an
+        # unrelated process) -- just clear the stale pid file.
+        if not self._pid_is_our_daemon(pid):
             self._cleanup_pid()
             return
 

@@ -57,13 +57,15 @@ class TestIsRunning:
         assert dm.is_running() is False
 
     def test_valid_running_process(self, tmp_path):
-        """Returns True when PID file exists and process responds to os.kill(pid, 0)."""
+        """Returns True when PID file exists and the pid is our live daemon."""
         pid_file = tmp_path / "daemon.pid"
         pid_file.write_text(json.dumps({"pid": 9999}))
         from llmport.daemon import DaemonManager
 
         dm = DaemonManager(config_dir=str(tmp_path))
-        with patch.object(os, "kill") as mock_kill:
+        with patch.object(os, "kill") as mock_kill, patch.object(
+            dm, "_process_cmdline", return_value="/p/python -m llmport --daemon"
+        ):
             result = dm.is_running()
         assert result is True
         mock_kill.assert_called_once_with(9999, 0)
@@ -78,6 +80,31 @@ class TestIsRunning:
         with patch.object(os, "kill", side_effect=OSError()):
             result = dm.is_running()
         assert result is False
+
+    def test_dead_process_cleans_stale_pid_file(self, tmp_path):
+        """A dead pid (stale file) is cleared so later commands ignore it."""
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text(json.dumps({"pid": 9999}))
+        from llmport.daemon import DaemonManager
+
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch.object(os, "kill", side_effect=OSError()):
+            assert dm.is_running() is False
+        assert not pid_file.exists()
+
+    def test_recycled_pid_treated_as_not_running(self, tmp_path):
+        """A pid reused by an unrelated process is not our daemon -> not running,
+        and the stale pid file is cleared."""
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text(json.dumps({"pid": 9999}))
+        from llmport.daemon import DaemonManager
+
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline", return_value="/usr/bin/some-other-program"
+        ):
+            assert dm.is_running() is False
+        assert not pid_file.exists()
 
     def test_malformed_json(self, tmp_path):
         """Returns False when PID file contains malformed JSON."""
@@ -115,7 +142,9 @@ class TestGetControlPort:
         from llmport.daemon import DaemonManager
 
         dm = DaemonManager(config_dir=str(tmp_path))
-        with patch.object(os, "kill"):  # process is "alive"
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline", return_value="/p/python -m llmport --daemon"
+        ):  # process is "alive" and ours
             assert dm.get_control_port() == 23456
 
     def test_malformed_pid_file(self, tmp_path):
@@ -142,18 +171,39 @@ class TestStop:
     """DaemonManager.stop()"""
 
     def test_stop_cleans_pid_file_via_signal(self, tmp_path):
-        """stop() shuts down via SIGTERM (no HTTP control API) and removes the PID file."""
+        """stop() shuts down our daemon via SIGTERM (no HTTP control API) and
+        removes the PID file."""
         pid_file = tmp_path / "daemon.pid"
         pid_file.write_text(json.dumps({"pid": 9999, "port": 23456}))
         from llmport.daemon import DaemonManager
 
         dm = DaemonManager(config_dir=str(tmp_path))
-        with patch.object(os, "kill", side_effect=OSError()), patch.object(
-            time, "sleep"
-        ), patch("llmport.daemon.httpx.Client") as MockClient:
+        with patch.object(os, "kill") as mock_kill, patch.object(
+            dm, "_process_cmdline", return_value="/p/python -m llmport --daemon"
+        ), patch.object(dm, "_wait_for_exit", return_value=True), patch(
+            "llmport.daemon.httpx.Client"
+        ) as MockClient:
             dm.stop()
-            # Control is via signals, not HTTP: no request is made.
+            # Control is via SIGTERM, not HTTP: no request is made.
+            mock_kill.assert_any_call(9999, 15)
             MockClient.return_value.__enter__.return_value.post.assert_not_called()
+        assert not pid_file.exists()
+
+    def test_stop_does_not_signal_recycled_pid(self, tmp_path):
+        """A pid reused by an unrelated process is NOT signaled -- only the
+        stale pid file is cleared, so an unrelated process is never killed."""
+        pid_file = tmp_path / "daemon.pid"
+        pid_file.write_text(json.dumps({"pid": 9999, "port": 23456}))
+        from llmport.daemon import DaemonManager
+
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch.object(os, "kill") as mock_kill, patch.object(
+            dm, "_process_cmdline", return_value="/usr/bin/some-other-program"
+        ):
+            dm.stop()
+            # No signal (15/SIGTERM or 9/SIGKILL) sent to the recycled pid.
+            sent = [call.args[1] for call in mock_kill.call_args_list]
+            assert 15 not in sent and 9 not in sent
         assert not pid_file.exists()
 
     def test_malformed_json(self, tmp_path):
@@ -180,23 +230,26 @@ class TestStart:
         with patch("llmport.daemon.subprocess.Popen") as MockPopen, \
              patch("llmport.daemon.httpx.Client") as MockClient, \
              patch("llmport.daemon.time.sleep"), \
-             patch.object(dm, "is_running", side_effect=[False, True]):
+             patch.object(dm, "is_running", side_effect=[False, True]), \
+             patch.object(dm, "_port_answers_health", return_value=False):
             MockClient.return_value.__enter__.return_value.get.return_value.status_code = 200
             assert dm.start() is True
             MockPopen.assert_called_once()
 
-    def test_start_returns_false_when_port_held_by_other_process(self, tmp_path):
-        """If /health answers but our daemon is not alive (port held by
-        another process), start() must report failure, not false success."""
+    def test_start_returns_false_when_orphan_on_port(self, tmp_path):
+        """If /health answers but our daemon is not alive (orphan / port held by
+        another process), start() must report failure, not false success or a
+        duplicate spawn."""
         from llmport.daemon import DaemonManager
 
         dm = DaemonManager(config_dir=str(tmp_path))
-        with patch("llmport.daemon.subprocess.Popen"), \
+        with patch("llmport.daemon.subprocess.Popen") as MockPopen, \
              patch("llmport.daemon.httpx.Client") as MockClient, \
              patch("llmport.daemon.time.sleep"), \
              patch.object(dm, "is_running", return_value=False):
             MockClient.return_value.__enter__.return_value.get.return_value.status_code = 200
             assert dm.start() is False
+            MockPopen.assert_not_called()
 
     def test_start_returns_false_on_timeout(self, tmp_path):
         """start() returns False when the gateway never becomes ready."""
@@ -218,7 +271,9 @@ class TestStart:
         pid_file = tmp_path / "daemon.pid"
         pid_file.write_text(json.dumps({"pid": 9999, "port": 11434}))
         dm = DaemonManager(config_dir=str(tmp_path))
-        with patch.object(os, "kill"), patch("llmport.daemon.subprocess.Popen") as MockPopen:
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline", return_value="/p/python -m llmport --daemon"
+        ), patch("llmport.daemon.subprocess.Popen") as MockPopen:
             assert dm.start() is True
             MockPopen.assert_not_called()
 
@@ -231,7 +286,8 @@ class TestStart:
         with patch("llmport.daemon.subprocess.Popen") as MockPopen, \
              patch("llmport.daemon.httpx.Client") as MockClient, \
              patch("llmport.daemon.time.sleep"), \
-             patch.object(dm, "is_running", side_effect=[False, True]):
+             patch.object(dm, "is_running", side_effect=[False, True]), \
+             patch.object(dm, "_port_answers_health", return_value=False):
             MockClient.return_value.__enter__.return_value.get.return_value.status_code = 200
             dm.start(host="127.0.0.1", port=9999)
         cmd = MockPopen.call_args[0][0]
@@ -285,6 +341,10 @@ class TestStopEscalation:
         # _wait_for_exit always "times out" -> full signal escalation.
         with patch.object(dm, "_wait_for_exit", return_value=False), \
              patch.object(os, "kill") as mock_kill, \
+             patch.object(
+                 dm, "_process_cmdline",
+                 return_value="/p/python -m llmport --daemon"
+             ), \
              patch("llmport.daemon.httpx.Client"):
             dm.stop()
         sent = [call.args[1] for call in mock_kill.call_args_list]
@@ -341,7 +401,9 @@ class TestGetStatus:
         from llmport.daemon import DaemonManager
 
         dm = DaemonManager(config_dir=str(tmp_path))
-        with patch.object(os, "kill"), patch("llmport.daemon.httpx.Client") as MockClient:
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline", return_value="/p/python -m llmport --daemon"
+        ), patch("llmport.daemon.httpx.Client") as MockClient:
             resp = MockClient.return_value.__enter__.return_value.get.return_value
             resp.status_code = 200
             resp.json.return_value = {"status": "ok"}
@@ -410,3 +472,65 @@ class TestArgvFlagValue:
         from llmport.daemon import _argv_flag_value
         monkeypatch.setattr("sys.argv", ["llmport", "--daemon"])
         assert _argv_flag_value("--host") is None
+
+
+class TestPidIsOurDaemon:
+    """_pid_is_our_daemon: liveness + command-line identity check."""
+
+    def _dm(self, tmp_path):
+        from llmport.daemon import DaemonManager
+        return DaemonManager(config_dir=str(tmp_path))
+
+    def test_dead_pid_is_not_ours(self, tmp_path):
+        dm = self._dm(tmp_path)
+        with patch.object(os, "kill", side_effect=OSError()):
+            assert dm._pid_is_our_daemon(9999) is False
+
+    def test_alive_but_cmdline_unavailable_falls_back_to_true(self, tmp_path):
+        """ps unavailable -> can't verify -> trust liveness (never worse than old behavior)."""
+        dm = self._dm(tmp_path)
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline", return_value=None
+        ):
+            assert dm._pid_is_our_daemon(9999) is True
+
+    def test_our_daemon_cmdline_is_ours(self, tmp_path):
+        dm = self._dm(tmp_path)
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline",
+            return_value="/venv/bin/python -m llmport --daemon --port 11434",
+        ):
+            assert dm._pid_is_our_daemon(9999) is True
+
+    def test_unrelated_cmdline_is_not_ours(self, tmp_path):
+        """A recycled pid running an unrelated program is rejected (pid reuse)."""
+        dm = self._dm(tmp_path)
+        with patch.object(os, "kill"), patch.object(
+            dm, "_process_cmdline", return_value="/usr/bin/node server.js"
+        ):
+            assert dm._pid_is_our_daemon(9999) is False
+
+
+class TestPortAnswersHealth:
+    """_port_answers_health: quick /health probe for orphan detection."""
+
+    def test_true_when_200(self, tmp_path):
+        from llmport.daemon import DaemonManager
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch("llmport.daemon.httpx.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value.get.return_value.status_code = 200
+            assert dm._port_answers_health(11434) is True
+
+    def test_false_on_non_200(self, tmp_path):
+        from llmport.daemon import DaemonManager
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch("llmport.daemon.httpx.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value.get.return_value.status_code = 503
+            assert dm._port_answers_health(11434) is False
+
+    def test_false_on_connection_error(self, tmp_path):
+        from llmport.daemon import DaemonManager
+        dm = DaemonManager(config_dir=str(tmp_path))
+        with patch("llmport.daemon.httpx.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value.get.side_effect = Exception
+            assert dm._port_answers_health(11434) is False
