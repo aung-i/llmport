@@ -12,11 +12,6 @@ from llmport.gateway.handler_base import (
     OpenedStream,
 )
 
-ENDPOINTS = {
-    "chat_completions": "/v1/chat/completions",
-    "models": "/v1/models",
-}
-
 
 def _build_headers(provider: ProviderConfig) -> dict:
     return {"Authorization": f"Bearer {provider.api_key}"}

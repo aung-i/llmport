@@ -1,11 +1,11 @@
-"""Tests for structural refactoring (Issues 1, 2, 3, 4, 6, 7).
+"""Structural-refactoring smoke tests.
 
-Issue 1 — server.py 拆分: GatewayState → state.py, control API → control_api.py
-Issue 2 — handler_base.py: 公共 forward/stream 抽取
-Issue 3 — SDK 路径兼容: /v1/chat/completions + /v1/messages
-Issue 4 — run_daemon 整合到 daemon.py
-Issue 6 — routing_strategy docstring
-Issue 7 — _parse_models 迁移到 models/parser.py
+Verifies the current module layout holds:
+  - server.py split into state.py + health.py
+  - handler_base.py exposes shared forward() / open_stream()
+  - SDK alias paths (/v1/*) removed; only /openai/v1/* and /anthropic/v1/* remain
+  - run_daemon unified in daemon.py
+  - parse_models migrated to models/parser.py
 """
 
 import tempfile
@@ -68,7 +68,7 @@ class TestIssue1ServerSplit:
 
 
 # ──────────────────────────────────────────────
-# Issue 2: handler_base.py shared forward/stream
+# Issue 2: handler_base.py shared forward/open_stream
 # ──────────────────────────────────────────────
 
 class TestIssue2HandlerBase:
@@ -80,7 +80,7 @@ class TestIssue2HandlerBase:
         assert callable(open_stream)
 
     def test_openai_handler_imports_from_handler_base(self):
-        """openai_handler must import forward/stream from handler_base (no
+        """openai_handler must import forward/open_stream from handler_base (no
         duplicate httpx code)."""
         import inspect
         from llmport.gateway import openai_handler
@@ -91,7 +91,7 @@ class TestIssue2HandlerBase:
         )
 
     def test_anthropic_handler_imports_from_handler_base(self):
-        """anthropic_handler must import forward/stream from handler_base."""
+        """anthropic_handler must import forward/open_stream from handler_base."""
         import inspect
         from llmport.gateway import anthropic_handler
         source = inspect.getsource(anthropic_handler)
@@ -101,7 +101,7 @@ class TestIssue2HandlerBase:
 
 
 # ──────────────────────────────────────────────
-# Issue 3: SDK path compatibility
+# Issue 3: SDK path aliases removed
 # ──────────────────────────────────────────────
 
 class TestIssue3SdkPaths:
@@ -166,7 +166,7 @@ class TestIssue4DaemonUnification:
 
 
 # ──────────────────────────────────────────────
-# Issue 7: _parse_models → models/parser.py
+# Issue 7: _parse_models -> models/parser.py
 # ──────────────────────────────────────────────
 
 class TestIssue7ParseModelsMigration:
@@ -228,5 +228,3 @@ class TestIssue7ParseModelsMigration:
             / "src" / "llmport" / "ui" / "screens" / "providers.py"
         ).read_text()
         assert "from llmport.models.parser import parse_models" in src
-
-
