@@ -5,7 +5,12 @@ import time
 import httpx
 
 from llmport.models.provider import ProviderConfig
-from llmport.gateway.handler_base import forward as _forward, stream as _stream
+from llmport.gateway.handler_base import (
+    forward as _forward,
+    open_stream as _open_stream,
+    UpstreamResult,
+    OpenedStream,
+)
 
 ENDPOINTS = {
     "chat_completions": "/v1/chat/completions",
@@ -22,22 +27,21 @@ async def forward(
     provider: ProviderConfig,
     model_name: str,
     path: str = "/v1/chat/completions",
-) -> tuple[dict | None, str | None]:
+) -> UpstreamResult:
     """Forward a non-streaming OpenAI request."""
     headers = _build_headers(provider)
     return await _forward(request_body, provider, model_name, path, headers)
 
 
-async def stream(
-    request_body: dict | bytes,
+async def open_stream(
+    request_body: dict,
     provider: ProviderConfig,
     model_name: str,
     path: str = "/v1/chat/completions",
-):
-    """Forward a streaming OpenAI request, yielding raw SSE bytes."""
+) -> OpenedStream | str:
+    """Open a streaming OpenAI request (caller peeks status before piping)."""
     headers = _build_headers(provider)
-    async for chunk in _stream(request_body, provider, model_name, path, headers):
-        yield chunk
+    return await _open_stream(request_body, provider, model_name, path, headers)
 
 
 async def list_models(

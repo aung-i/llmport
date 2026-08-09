@@ -1,4 +1,4 @@
-"""Gateway mutable state shared between the server and control API."""
+"""Gateway mutable state shared between the server and health endpoint."""
 
 import time
 
@@ -9,7 +9,7 @@ from llmport.gateway.router import Router
 
 
 class GatewayState:
-    """Mutable state shared between the server and control API."""
+    """Mutable state shared between the server and health endpoint."""
 
     def __init__(self, store: ConfigStore):
         self.store = store
@@ -17,8 +17,6 @@ class GatewayState:
         self.models = []
         self.gateway: dict = {"host": "127.0.0.1", "port": 11434}
         self.started_at = time.time()
-        self.request_count = 0
-        self.total_tokens = 0
         self.reload()
 
     def reload(self) -> None:

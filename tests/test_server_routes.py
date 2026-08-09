@@ -72,13 +72,13 @@ class TestCreateApp:
             assert app.__class__.__name__ == "Starlette"
 
     def test_app_has_correct_route_count(self):
-        """The single app has 9 routes (6 protocol + 3 control: status + 2 lifecycle)."""
+        """The app has 5 routes (4 protocol + 1 health probe)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = gateway_server.create_app(_make_store(tmp))
-            assert len(app.routes) == 9
+            assert len(app.routes) == 5
 
     def test_protocol_route_paths_present(self):
-        """Each expected protocol route path is registered."""
+        """Each expected route path is registered."""
         with tempfile.TemporaryDirectory() as tmp:
             app = gateway_server.create_app(_make_store(tmp))
 
@@ -87,26 +87,29 @@ class TestCreateApp:
             assert "/openai/v1/models" in paths
             assert "/openai/v1/{path:path}" in paths
             assert "/anthropic/v1/messages" in paths
-            assert "/v1/chat/completions" in paths
-            assert "/v1/messages" in paths
+            assert "/health" in paths
+            # SDK alias paths were removed.
+            assert "/v1/chat/completions" not in paths
+            assert "/v1/messages" not in paths
 
-    def test_control_route_paths_present(self):
-        """Only read-only status + lifecycle control routes are registered."""
+    def test_no_control_routes_only_health(self):
+        """No HTTP control surface: /api/* is gone, only the /health probe remains."""
         with tempfile.TemporaryDirectory() as tmp:
             app = gateway_server.create_app(_make_store(tmp))
 
             paths = {r.path for r in app.routes}
-            # The only control routes left.
-            assert "/api/status" in paths
-            assert "/api/daemon/stop" in paths
-            assert "/api/daemon/restart" in paths
+            # The only non-forwarding route is the read-only health probe.
+            assert "/health" in paths
+            # No control API rides on the forwarding port.
+            assert "/api/status" not in paths
+            assert "/api/daemon/stop" not in paths
+            assert "/api/daemon/restart" not in paths
             # Config write/test/fetch endpoints were removed (SSRF surface).
             assert "/api/models" not in paths
             assert "/api/providers" not in paths
             assert "/api/providers/test" not in paths
             assert "/api/providers/models" not in paths
             assert "/api/gateway/config" not in paths
-            # The old /api/models/switch route has been removed.
             assert "/api/models/switch" not in paths
 
     def test_routes_have_correct_methods(self):
@@ -129,11 +132,8 @@ class TestCreateApp:
             assert "POST" in catchall.methods
             assert "GET" in catchall.methods
 
-            # /api/status is GET-only (Starlette auto-adds HEAD).
-            assert "GET" in by_path["/api/status"][0].methods
-            # Lifecycle endpoints are POST-only.
-            assert by_path["/api/daemon/stop"][0].methods == {"POST"}
-            assert by_path["/api/daemon/restart"][0].methods == {"POST"}
+            # /health is GET-only (Starlette auto-adds HEAD).
+            assert "GET" in by_path["/health"][0].methods
 
     def test_init_state_called(self):
         """create_app calls init_state so get_state() works afterwards.
@@ -185,6 +185,8 @@ class TestModelRouting:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
+            import json as _json
+            from llmport.gateway.handler_base import UpstreamResult
             success = {
                 "id": "x",
                 "object": "chat.completion",
@@ -193,7 +195,9 @@ class TestModelRouting:
             }
             with patch(
                 "llmport.gateway.server.openai_handler.forward",
-                new=AsyncMock(return_value=(success, None)),
+                new=AsyncMock(return_value=UpstreamResult(
+                    200, _json.dumps(success).encode(), "application/json", None
+                )),
             ):
                 resp = client.post("/openai/v1/chat/completions", json={
                     "model": "gpt5",
@@ -202,22 +206,13 @@ class TestModelRouting:
             assert resp.status_code == 200
             assert resp.json() == success
 
-    def test_sdk_alias_path_routes_chat(self):
-        """The /v1/chat/completions SDK alias also routes by model."""
+    def test_sdk_alias_paths_removed(self):
+        """The /v1/* SDK alias paths were removed and now 404."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
-            success = {"id": "x", "object": "chat.completion", "choices": []}
-            with patch(
-                "llmport.gateway.server.openai_handler.forward",
-                new=AsyncMock(return_value=(success, None)),
-            ):
-                resp = client.post("/v1/chat/completions", json={
-                    "model": "gpt5",
-                    "messages": [{"role": "user", "content": "hi"}],
-                })
-            assert resp.status_code == 200
-            assert resp.json() == success
+            assert client.post("/v1/chat/completions", json={"model": "gpt5"}).status_code == 404
+            assert client.post("/v1/messages", json={"model": "gpt5"}).status_code == 404
 
 
 # ============================================================================
@@ -306,24 +301,30 @@ class TestOpenaiCatchall:
     """The /openai/v1/{path} catchall forwards arbitrary OpenAI endpoints."""
 
     def test_forwards_arbitrary_endpoint(self):
-        """A JSON request with a known model is streamed through to the handler."""
+        """A non-stream JSON request to a catchall endpoint is forwarded, with
+        the ``/openai`` prefix stripped so the upstream sees ``/v1/<path>``."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
+            from llmport.gateway.handler_base import UpstreamResult
+            captured = {}
 
-            async def fake_stream(body, provider, model_name, path):
-                yield b"data: ok\n\n"
+            async def fake_forward(body, provider, model_name, path):
+                captured["path"] = path
+                return UpstreamResult(200, b'{"data":["ok"]}', "application/json", None)
 
             with patch(
-                "llmport.gateway.server.openai_handler.stream",
-                side_effect=fake_stream,
+                "llmport.gateway.server.openai_handler.forward",
+                new=fake_forward,
             ):
                 resp = client.post(
                     "/openai/v1/embeddings",
                     json={"model": "gpt5", "input": "x"},
                 )
             assert resp.status_code == 200
-            assert b"data: ok" in resp.content
+            assert b'"ok"' in resp.content
+            # /openai prefix stripped -> upstream path is /v1/embeddings
+            assert captured["path"] == "/v1/embeddings"
 
     def test_non_json_body_returns_400(self):
         """A non-JSON body is rejected with 400 (model cannot be read)."""

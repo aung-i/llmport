@@ -1,14 +1,42 @@
 """Provider data model."""
 
+import time
 from dataclasses import dataclass, field
 
 
 @dataclass
 class ProviderHealth:
-    """Health check result for a provider (runtime state, not persisted in config)."""
+    """Health check result for a provider (runtime state, not persisted in config).
+
+    ``status == "down"`` has two flavors, distinguished by ``down_until``:
+
+    * ``down_until is None`` -> **permanent** down. Used for SSRF-risky
+      base_urls caught at config load (never recovered).
+    * ``down_until`` is an epoch -> **temporary** down (runtime failure).
+      :meth:`is_down` returns False once ``time.time()`` passes it, so the
+      provider is retried on the next request without a background task.
+    """
     status: str = "unknown"        # "up" | "degraded" | "down"
     latency_ms: float = 0.0
     last_check: str | None = None  # ISO timestamp
+    down_until: float | None = None  # epoch seconds; None + "down" = permanent
+
+    def is_down(self) -> bool:
+        """True if the provider should be skipped by the router right now.
+
+        A temporary (runtime) down recovers automatically once its cooldown
+        expires; a permanent (SSRF) down never does.
+        """
+        if self.status != "down":
+            return False
+        if self.down_until is None:
+            return True  # permanent
+        return self.down_until > time.time()
+
+    def mark_down(self, seconds: float) -> None:
+        """Mark the provider temporarily down for ``seconds`` (runtime failure)."""
+        self.status = "down"
+        self.down_until = time.time() + seconds
 
 
 @dataclass

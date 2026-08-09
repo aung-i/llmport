@@ -5,7 +5,12 @@ import time
 import httpx
 
 from llmport.models.provider import ProviderConfig
-from llmport.gateway.handler_base import forward as _forward, stream as _stream
+from llmport.gateway.handler_base import (
+    forward as _forward,
+    open_stream as _open_stream,
+    UpstreamResult,
+    OpenedStream,
+)
 
 
 def _build_headers(provider: ProviderConfig) -> dict:
@@ -20,22 +25,21 @@ async def forward(
     provider: ProviderConfig,
     model_name: str,
     path: str = "/v1/messages",
-) -> tuple[dict | None, str | None]:
+) -> UpstreamResult:
     """Forward a non-streaming Messages request."""
     headers = _build_headers(provider)
     return await _forward(request_body, provider, model_name, path, headers)
 
 
-async def stream(
-    request_body: dict | bytes,
+async def open_stream(
+    request_body: dict,
     provider: ProviderConfig,
     model_name: str,
     path: str = "/v1/messages",
-):
-    """Forward a streaming Messages request, yielding raw SSE bytes."""
+) -> OpenedStream | str:
+    """Open a streaming Messages request (caller peeks status before piping)."""
     headers = _build_headers(provider)
-    async for chunk in _stream(request_body, provider, model_name, path, headers):
-        yield chunk
+    return await _open_stream(request_body, provider, model_name, path, headers)
 
 
 async def test_connection(

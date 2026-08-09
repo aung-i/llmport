@@ -1,14 +1,19 @@
-"""Gateway HTTP server — route handlers and application factory.
+"""Gateway HTTP server - route handlers and application factory.
 
 This module owns the protocol-specific route handlers (``openai_chat``,
 ``anthropic_messages``, etc.) and the ``create_app()`` factory.
 
-State management lives in :mod:`llmport.gateway.state` and control-API
-endpoints live in :mod:`llmport.gateway.control_api`.
-"""
+State management lives in :mod:`llmport.gateway.state`; the read-only
+health endpoint lives in :mod:`llmport.gateway.health`. Lifecycle control
+(stop / restart) is via process signals, not HTTP.
 
-import json as _json
-import time
+Error handling is **transparent**: the real upstream status code + body are
+passed through to the client. There is no in-request fallback -- if a
+provider fails, the client sees the real error, and the provider is marked
+down for a cooldown so the *next* request routes to the next binding. Only
+when the upstream never responds (timeout / unreachable) does the gateway
+synthesize a 504.
+"""
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -16,107 +21,15 @@ from starlette.responses import JSONResponse, StreamingResponse, Response
 from starlette.routing import Route
 
 from llmport.config.store import ConfigStore
-from llmport.models.provider import ProviderConfig
 from llmport.gateway.router import Router, RouterError
-from llmport.gateway.state import GatewayState, init_state, get_state
+from llmport.gateway.state import init_state, get_state
 from llmport.gateway import openai_handler, anthropic_handler
-from llmport.gateway.control_api import (
-    control_status,
-    control_daemon_stop,
-    control_daemon_restart,
-)
+from llmport.gateway.health import health
+from llmport.gateway.handler_base import UpstreamResult, OpenedStream
 
-# ============================================================================
-# Token-tracking helpers
-# ============================================================================
-
-
-def _safe_token_val(val) -> int:
-    """Return max(0, int(val)) handling non-int/negative values gracefully."""
-    if isinstance(val, int) and val >= 0:
-        return val
-    if isinstance(val, (float, str)):
-        try:
-            return max(0, int(float(val)))
-        except (ValueError, TypeError):
-            pass
-    return 0
-
-
-def _extract_tokens(result: dict) -> int:
-    """Extract total token count from a non-streaming response dict.
-
-    Supports both OpenAI (``usage.total_tokens``) and Anthropic
-    (``usage.input_tokens + usage.output_tokens``) formats.
-    Returns 0 when no usage is present.
-    """
-    usage = result.get("usage") or {}
-    # OpenAI format
-    val = usage.get("total_tokens")
-    if val is not None:
-        return _safe_token_val(val)
-    # Anthropic format
-    total = 0
-    for key in ("input_tokens", "output_tokens"):
-        val = usage.get(key)
-        if val is not None:
-            total += _safe_token_val(val)
-    return total
-
-
-def _parse_usage_from_sse(chunk: bytes) -> int | None:
-    """Parse usage from a single SSE chunk (OpenAI or Anthropic format).
-
-    Returns total_tokens or None if the chunk contains no usage info.
-    """
-    if not chunk:
-        return None
-    try:
-        text = chunk.decode("utf-8", errors="replace")
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:]
-            if payload in ("[DONE]",):
-                continue
-            obj = _json.loads(payload)
-            usage = obj.get("usage")
-            if usage is None:
-                # Anthropic message_start nests usage under "message"
-                msg = obj.get("message")
-                if isinstance(msg, dict):
-                    usage = msg.get("usage")
-            if not usage:
-                continue
-            # OpenAI: usage.total_tokens
-            total = _safe_token_val(usage.get("total_tokens"))
-            if total:
-                return total
-            # Anthropic: usage.input_tokens + usage.output_tokens
-            inp = _safe_token_val(usage.get("input_tokens"))
-            out = _safe_token_val(usage.get("output_tokens"))
-            if inp or out:
-                return inp + out
-    except Exception:
-        pass
-    return None
-
-
-async def _tracked_stream(generator, state):
-    """Wrap an async SSE generator to track usage and request count.
-
-    Passes through all chunks and, after the stream completes, increments
-    *request_count* and accumulates *total_tokens* from any SSE usage fields.
-    """
-    try:
-        async for chunk in generator:
-            yield chunk
-            usage = _parse_usage_from_sse(chunk)
-            if usage is not None:
-                state.total_tokens += usage
-    finally:
-        state.request_count += 1
+# How long (seconds) a provider stays down after a runtime failure before the
+# router retries it.
+COOLDOWN_SECONDS = 30.0
 
 
 async def _read_json_body(request: Request) -> dict | None:
@@ -135,13 +48,81 @@ async def _read_json_body(request: Request) -> dict | None:
     return body
 
 
+def _is_availability_failure(status: int) -> bool:
+    """True for upstream statuses that mean the provider is unhealthy right now.
+
+    5xx (server error) and 429 (rate limited) are availability problems --
+    another provider might serve the same request, so the failing one is
+    marked down. Other 4xx (bad request, auth, not found) are not: switching
+    providers won't help, and the client should see the real error.
+    """
+    return status >= 500 or status == 429
+
+
+def _no_response_response(provider, reason: str) -> Response:
+    """504 when the upstream never responded (timeout / unreachable)."""
+    provider.health.mark_down(COOLDOWN_SECONDS)
+    return JSONResponse(
+        {"error": f"provider {provider.name} {reason}"},
+        status_code=504,
+    )
+
+
+def _passthrough(result: UpstreamResult, provider) -> Response:
+    """Return the real upstream response to the client; mark down on availability failures."""
+    if result.status is None:
+        return _no_response_response(provider, result.reason)
+    if _is_availability_failure(result.status):
+        provider.health.mark_down(COOLDOWN_SECONDS)
+    return Response(
+        content=result.body,
+        status_code=result.status,
+        media_type=result.content_type or "application/json",
+    )
+
+
+async def _stream_response(body, provider, model_name, handler, path) -> Response:
+    """Open the upstream stream, peek its status, then decide.
+
+    A 2xx is piped to the client as SSE (the 200 is committed only once we
+    know the upstream succeeded). An error status is read in full and passed
+    through verbatim -- never turned into a fake 200 + ``[ERROR]`` text. No
+    response (timeout / unreachable) yields a 504.
+    """
+    opened = await handler.open_stream(body, provider, model_name, path)
+    if isinstance(opened, str):  # "timeout" | "unreachable"
+        return _no_response_response(provider, opened)
+
+    status = opened.status
+    if status >= 400:
+        error_body = await opened.aread()
+        content_type = opened.content_type
+        await opened.aclose()
+        if _is_availability_failure(status):
+            provider.health.mark_down(COOLDOWN_SECONDS)
+        return Response(
+            content=error_body,
+            status_code=status,
+            media_type=content_type or "application/json",
+        )
+
+    async def _pipe():
+        try:
+            async for chunk in opened.aiter_bytes():
+                yield chunk
+        finally:
+            await opened.aclose()
+
+    return StreamingResponse(_pipe(), media_type="text/event-stream")
+
+
 # ============================================================================
 # OpenAI protocol endpoints
 # ============================================================================
 
 
 async def openai_chat(request: Request) -> Response:
-    """POST /openai/v1/chat/completions (and SDK alias ``/v1/chat/completions``)."""
+    """POST /openai/v1/chat/completions."""
     state = get_state()
     router = state.get_router()
     body = await _read_json_body(request)
@@ -162,71 +143,11 @@ async def openai_chat(request: Request) -> Response:
             status_code=400,
         )
 
-    is_stream = body.get("stream", False)
-
-    if is_stream:
-        async def generate():
-            last_binding = (provider.name, model_name)
-            cur_provider = provider
-            cur_model = model_name
-
-            while True:
-                gen = openai_handler.stream(body, cur_provider, cur_model)
-                try:
-                    first_chunk = await gen.__anext__()
-                except StopAsyncIteration:
-                    return
-
-                if b"[ERROR]" not in first_chunk:
-                    yield first_chunk
-                    async for chunk in gen:
-                        yield chunk
-                    return
-
-                await gen.aclose()
-
-                # Find next fallback with matching protocol
-                while True:
-                    fb = router.try_fallback(requested, last_binding)
-                    if not fb:
-                        yield first_chunk  # all exhausted
-                        return
-                    fb_provider, fb_model = fb
-                    last_binding = (fb_provider.name, fb_model)
-                    if fb_provider.protocol == "openai":
-                        cur_provider = fb_provider
-                        cur_model = fb_model
-                        break
-                # Continue outer loop with new provider
-
-        return StreamingResponse(
-            _tracked_stream(generate(), state),
-            media_type="text/event-stream",
-        )
-    else:
-        result, error = await openai_handler.forward(body, provider, model_name)
-        if error:
-            last_binding = (provider.name, model_name)
-            while True:
-                fb = router.try_fallback(requested, last_binding)
-                if not fb:
-                    break
-                fb_provider, fb_model = fb
-                if fb_provider.protocol != "openai":
-                    last_binding = (fb_provider.name, fb_model)
-                    continue
-                result, error = await openai_handler.forward(
-                    body, fb_provider, fb_model
-                )
-                if not error:
-                    break
-                last_binding = (fb_provider.name, fb_model)
-
-        state.request_count += 1
-        if error:
-            return JSONResponse({"error": error}, status_code=502)
-        state.total_tokens += _extract_tokens(result)
-        return JSONResponse(result)
+    path = "/v1/chat/completions"
+    if body.get("stream", False):
+        return await _stream_response(body, provider, model_name, openai_handler, path)
+    result = await openai_handler.forward(body, provider, model_name, path)
+    return _passthrough(result, provider)
 
 
 async def openai_models(request: Request) -> Response:
@@ -244,12 +165,11 @@ async def openai_models(request: Request) -> Response:
 async def openai_catchall(request: Request) -> Response:
     """Forward any other OpenAI endpoint transparently.
 
-    Note: this is a generic passthrough for arbitrary endpoints
-    (e.g. ``/v1/embeddings``, ``/v1/audio/transcriptions``).  It
-    intentionally has **no fallback logic** and **no stats tracking**
-    because the upstream protocol/response format is unknown at this
-    level.  Protocol-specific endpoints (``/v1/chat/completions``)
-    with full fallback + stats are handled by ``openai_chat``.
+    This is a generic passthrough for arbitrary endpoints
+    (e.g. ``/v1/embeddings``, ``/v1/audio/transcriptions``). The ``/openai``
+    prefix is stripped so the upstream sees ``/v1/<path>``. It has no
+    in-request fallback (same transparency rule as the chat endpoint); a
+    failure marks the provider down and the next request routes around it.
     """
     state = get_state()
     router = state.get_router()
@@ -274,15 +194,14 @@ async def openai_catchall(request: Request) -> Response:
             status_code=400,
         )
 
-    path = request.url.path
-
-    async def generate():
-        async for chunk in openai_handler.stream(
-            body, provider, model_name, path=path
-        ):
-            yield chunk
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    # Strip the /openai prefix: client hits /openai/v1/embeddings, upstream
+    # gets /v1/embeddings. The route's literal prefix is /openai/v1/, so the
+    # captured path is the part after it (e.g. "embeddings").
+    path = "/v1/" + request.path_params["path"]
+    if body.get("stream", False):
+        return await _stream_response(body, provider, model_name, openai_handler, path)
+    result = await openai_handler.forward(body, provider, model_name, path)
+    return _passthrough(result, provider)
 
 
 # ============================================================================
@@ -291,7 +210,7 @@ async def openai_catchall(request: Request) -> Response:
 
 
 async def anthropic_messages(request: Request) -> Response:
-    """POST /anthropic/v1/messages (and SDK alias ``/v1/messages``)."""
+    """POST /anthropic/v1/messages."""
     state = get_state()
     router = state.get_router()
     body = await _read_json_body(request)
@@ -312,71 +231,11 @@ async def anthropic_messages(request: Request) -> Response:
             status_code=400,
         )
 
-    is_stream = body.get("stream", False)
-
-    if is_stream:
-        async def generate():
-            last_binding = (provider.name, model_name)
-            cur_provider = provider
-            cur_model = model_name
-
-            while True:
-                gen = anthropic_handler.stream(body, cur_provider, cur_model)
-                try:
-                    first_chunk = await gen.__anext__()
-                except StopAsyncIteration:
-                    return
-
-                if b"[ERROR]" not in first_chunk:
-                    yield first_chunk
-                    async for chunk in gen:
-                        yield chunk
-                    return
-
-                await gen.aclose()
-
-                # Find next fallback with matching protocol
-                while True:
-                    fb = router.try_fallback(requested, last_binding)
-                    if not fb:
-                        yield first_chunk  # all exhausted
-                        return
-                    fb_provider, fb_model = fb
-                    last_binding = (fb_provider.name, fb_model)
-                    if fb_provider.protocol == "anthropic":
-                        cur_provider = fb_provider
-                        cur_model = fb_model
-                        break
-                # Continue outer loop with new provider
-
-        return StreamingResponse(
-            _tracked_stream(generate(), state),
-            media_type="text/event-stream",
-        )
-    else:
-        result, error = await anthropic_handler.forward(body, provider, model_name)
-        if error:
-            last_binding = (provider.name, model_name)
-            while True:
-                fb = router.try_fallback(requested, last_binding)
-                if not fb:
-                    break
-                fb_provider, fb_model = fb
-                if fb_provider.protocol != "anthropic":
-                    last_binding = (fb_provider.name, fb_model)
-                    continue
-                result, error = await anthropic_handler.forward(
-                    body, fb_provider, fb_model
-                )
-                if not error:
-                    break
-                last_binding = (fb_provider.name, fb_model)
-
-        state.request_count += 1
-        if error:
-            return JSONResponse({"error": error}, status_code=502)
-        state.total_tokens += _extract_tokens(result)
-        return JSONResponse(result)
+    path = "/v1/messages"
+    if body.get("stream", False):
+        return await _stream_response(body, provider, model_name, anthropic_handler, path)
+    result = await anthropic_handler.forward(body, provider, model_name, path)
+    return _passthrough(result, provider)
 
 
 # ============================================================================
@@ -387,30 +246,23 @@ async def anthropic_messages(request: Request) -> Response:
 def create_app(store: ConfigStore) -> Starlette:
     """Create the gateway application.
 
-    A single Starlette app serves both the protocol-forwarding routes
-    (``/openai/v1/*``, ``/anthropic/v1/*``, ``/v1/*``) and the control API
-    (``/api/*``) on one port.
+    A single Starlette app serves the protocol-forwarding routes
+    (``/openai/v1/*``, ``/anthropic/v1/*``) and a read-only ``/health``
+    liveness probe on one port. Lifecycle control is via process signals.
     """
     init_state(store)
 
     routes = [
-        # OpenAI protocol (explicit prefix + SDK short path)
+        # OpenAI protocol
         Route("/openai/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/openai/v1/models", openai_models, methods=["GET"]),
         Route("/openai/v1/{path:path}", openai_catchall, methods=["POST", "GET"]),
-        # Anthropic protocol (explicit prefix + SDK short path)
+        # Anthropic protocol
         Route("/anthropic/v1/messages", anthropic_messages, methods=["POST"]),
-        # SDK-compatible alias paths
-        Route("/v1/chat/completions", openai_chat, methods=["POST"]),
-        Route("/v1/messages", anthropic_messages, methods=["POST"]),
-        # Control API -- read-only status + lifecycle only.
-        # Configuration (providers/models/gateway) is managed via the CLI,
-        # which writes config.yaml + providers.yaml and restarts the daemon;
-        # the write/test endpoints were removed to close the programmatic SSRF
-        # entry (arbitrary base_url injection/fetch at runtime).
-        Route("/api/status", control_status, methods=["GET"]),
-        Route("/api/daemon/stop", control_daemon_stop, methods=["POST"]),
-        Route("/api/daemon/restart", control_daemon_restart, methods=["POST"]),
+        # Read-only liveness probe. Lifecycle control (stop / restart) is via
+        # process signals, not HTTP, so no control surface rides on the
+        # forwarding port.
+        Route("/health", health, methods=["GET"]),
     ]
 
     return Starlette(routes=routes)

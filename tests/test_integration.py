@@ -25,22 +25,21 @@ def test_full_flow():
         store.save_models_config({"models": {
             "test-model": {"test-provider": "test-model-real"}}})
 
-        # Single app serves both protocol routes and control API
+        # Single app serves protocol routes + the /health probe.
         app = create_app(store)
         client = TestClient(app)
 
-        # Check status via control API
-        resp = client.get("/api/status")
+        # Liveness probe (read-only, no stats).
+        resp = client.get("/health")
         assert resp.status_code == 200
-        status = resp.json()
-        assert "test-model" in status["models"]
-        assert "total_tokens" in status
+        assert resp.json() == {"status": "ok"}
 
         # Models endpoint via gateway
         resp = client.get("/openai/v1/models")
         assert resp.status_code == 200
         models = resp.json()
         assert len(models["data"]) >= 1
+        assert any(m["id"] == "test-model" for m in models["data"])
 
 
 def test_protocol_mismatch_error():
@@ -86,20 +85,6 @@ def test_stray_legacy_config_enc_is_ignored():
         assert store.config_path.exists()
         assert not (store.dir / "models.yaml").exists()
         assert store.load_providers_config()["providers"] == []
-
-
-def test_daemon_restart_endpoint():
-    """POST /api/daemon/restart returns ok with action."""
-    with tempfile.TemporaryDirectory() as tmp:
-        store = ConfigStore(tmp)
-        store.init_first_run()
-        app = create_app(store)
-        client = TestClient(app)
-
-        resp = client.post("/api/daemon/restart")
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is True
-        assert resp.json()["action"] == "restart"
 
 
 def test_parse_models_utility():

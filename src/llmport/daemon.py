@@ -1,9 +1,9 @@
 """Daemon lifecycle management for the gateway server.
 
 The gateway runs as a background subprocess serving a single Starlette app
-on one loopback port. Both the protocol-forwarding routes (``/openai/v1/*``,
-``/anthropic/v1/*``, ``/v1/*``) and the control API (``/api/*``) live on that
-same port, so there is no separate control port to discover.
+on one loopback port: protocol-forwarding routes (``/openai/v1/*``,
+``/anthropic/v1/*``) plus a read-only ``/health`` probe. Lifecycle control
+(stop / restart) is via process signals, not HTTP.
 """
 
 import os
@@ -19,7 +19,7 @@ from llmport.config.store import ConfigStore
 
 DEFAULT_PORT = 11434
 
-# How long start() waits for the gateway to answer /api/status before giving up.
+# How long start() waits for the gateway to answer /health before giving up.
 _START_TIMEOUT_SECONDS = 10.0
 
 # The gateway is loopback-only by design. No matter what config.yaml says, the
@@ -118,19 +118,23 @@ class DaemonManager:
             return None
         return self._gateway_port()
 
+    def started_at(self) -> float | None:
+        """Return the daemon start time (epoch seconds) from the PID file."""
+        return self._read_pid_field("started_at")
+
     def get_status(self) -> dict:
-        """Get daemon status via control API."""
+        """Get daemon liveness via /health."""
         if not self.is_running():
             return {"running": False}
         port = self._gateway_port()
         try:
             with httpx.Client(timeout=5.0) as client:
-                resp = client.get(f"http://127.0.0.1:{port}/api/status")
+                resp = client.get(f"http://127.0.0.1:{port}/health")
                 if resp.status_code == 200:
                     return {"running": True, **resp.json()}
         except Exception:
             pass
-        return {"running": True, "error": "Cannot reach control API"}
+        return {"running": True, "error": "Cannot reach /health"}
 
     async def async_get_status(self) -> dict:
         """Async version of get_status."""
@@ -139,12 +143,12 @@ class DaemonManager:
         port = self._gateway_port()
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"http://127.0.0.1:{port}/api/status")
+                resp = await client.get(f"http://127.0.0.1:{port}/health")
                 if resp.status_code == 200:
                     return {"running": True, **resp.json()}
         except Exception:
             pass
-        return {"running": True, "error": "Cannot reach control API"}
+        return {"running": True, "error": "Cannot reach /health"}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -156,7 +160,7 @@ class DaemonManager:
         ``host``/``port`` (from ``llmport start --host/--port``) override the
         ``gateway:`` section of ``providers.yaml`` for this run; they are
         passed to the daemon subprocess on its argv. Returns True if the
-        gateway answered ``/api/status`` within the startup timeout.
+        gateway answered ``/health`` within the startup timeout.
         """
         if self.is_running():
             return True
@@ -179,7 +183,7 @@ class DaemonManager:
             try:
                 with httpx.Client(timeout=1.0) as client:
                     if client.get(
-                        f"http://127.0.0.1:{wait_port}/api/status"
+                        f"http://127.0.0.1:{wait_port}/health"
                     ).status_code == 200:
                         # Confirm it is OUR daemon (PID file present + alive),
                         # not another process squatting on the port.
@@ -190,33 +194,27 @@ class DaemonManager:
         return False
 
     def stop(self) -> None:
-        """Stop the daemon: ask the control API, then escalate to signals."""
+        """Stop the daemon via signals (SIGTERM, then SIGKILL).
+
+        Control is exercised over the process, not over HTTP, so no control
+        surface rides on the forwarding port. uvicorn handles SIGTERM with a
+        graceful shutdown.
+        """
         pid = self._read_pid_field("pid")
         if pid is None:
             self._cleanup_pid()
             return
 
-        port = self._gateway_port()
-        # 1. Ask the control API to shut down gracefully.
+        # 1. SIGTERM (uvicorn handles it gracefully).
         try:
-            with httpx.Client(timeout=5.0) as client:
-                client.post(f"http://127.0.0.1:{port}/api/daemon/stop")
-        except Exception:
+            os.kill(pid, 15)  # SIGTERM
+        except OSError:
             pass
         if self._wait_for_exit(pid, 6.0):
             self._cleanup_pid()
             return
 
-        # 2. SIGTERM (uvicorn handles it gracefully).
-        try:
-            os.kill(pid, 15)  # SIGTERM
-        except OSError:
-            pass
-        if self._wait_for_exit(pid, 5.0):
-            self._cleanup_pid()
-            return
-
-        # 3. SIGKILL as a last resort.
+        # 2. SIGKILL as a last resort.
         try:
             os.kill(pid, 9)  # SIGKILL
         except OSError:
@@ -264,7 +262,6 @@ def run_daemon(host: str | None = None, port: int | None = None) -> None:
     import uvicorn
 
     from llmport.gateway.server import create_app
-    from llmport.gateway import control_api
 
     store = ConfigStore()
     store.init_first_run()
@@ -295,7 +292,6 @@ def run_daemon(host: str | None = None, port: int | None = None) -> None:
     app = create_app(store)
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
-    control_api.set_shutdown_server(server)
 
     try:
         server.run()

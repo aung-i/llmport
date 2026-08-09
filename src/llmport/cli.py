@@ -11,6 +11,7 @@ they stay callable from tests without going through argv parsing.
 import getpass
 import os
 import subprocess
+import time
 import unicodedata
 from typing import Literal
 
@@ -652,8 +653,7 @@ def _cmd_start(dm: DaemonManager, host: str | None = None, port: int | None = No
         print(f"Gateway started on {_url(dm)}")
         print("  /openai/v1/*    -> OpenAI protocol")
         print("  /anthropic/v1/* -> Anthropic protocol")
-        print("  /v1/*           -> SDK aliases")
-        print("  /api/*          -> control API")
+        print("  /health         -> liveness probe")
     else:
         print("Gateway failed to start. Check that the configured port is free.")
 
@@ -690,31 +690,32 @@ def _cmd_status(dm: DaemonManager) -> None:
         print("Gateway is not running.")
         return
 
-    gw = status.get("gateway") or {}
+    gw = dm.store.load_gateway()
     host = gw.get("host", "127.0.0.1")
-    port = gw.get("port") or dm.get_control_port()
+    port = dm.get_control_port() or gw.get("port", 11434)
     print(f"Gateway running on http://{host}:{port}")
     print("  /openai/v1/*    -> OpenAI")
     print("  /anthropic/v1/* -> Anthropic")
-    print("  /v1/*           -> SDK aliases")
-    print("  /api/*          -> control")
+    print("  /health         -> liveness probe")
     print()
 
-    models = status.get("models") or []
-    if models:
-        print(f"  Models ({len(models)}): {', '.join(models)}")
+    # Models / providers are read from the local config files; /health only
+    # reports liveness, so the HTTP probe carries no config or stats.
+    model_names = _local_model_names(dm.store)
+    if model_names:
+        print(f"  Models ({len(model_names)}): {', '.join(model_names)}")
     else:
         print("  Models: none configured")
-    print(f"  Uptime:   {_fmt_uptime(status.get('uptime', 0))}")
-    print(f"  Requests: {status.get('request_count', 0)}")
-    print(f"  Tokens:   {status.get('total_tokens', 0)}")
 
-    providers = status.get("providers") or []
-    if providers:
-        print(f"  Providers ({len(providers)}):")
-        for p in providers:
-            latency = p.get("latency_ms", 0) or 0
-            print(f"    {p['name']:<16} {p['status']:<10} {latency:.0f}ms")
+    provider_names = _local_provider_names(dm.store)
+    if provider_names:
+        print(f"  Providers ({len(provider_names)}): {', '.join(provider_names)}")
+    else:
+        print("  Providers: none configured")
+
+    started_at = dm.started_at()
+    if started_at:
+        print(f"  Uptime: {_fmt_uptime(time.time() - started_at)}")
 
 
 # ============================================================================
@@ -786,6 +787,29 @@ def _safe_load_models(store) -> dict | None:
         print(f"配置文件 {store.config_path} 无法解析: {e}")
         print("已中止,不会覆盖现有配置。请修复后重试,或备份后删除该文件重新配置。")
         raise SystemExit(1)
+
+
+def _local_model_names(store) -> list[str]:
+    """Model public names from config.yaml (for status display).
+
+    Lenient: returns [] if the file is missing or unreadable so a corrupt
+    config never crashes ``llmport status``.
+    """
+    from llmport.models.model import parse_models_config
+    try:
+        cfg = store.load_config()
+    except (FileNotFoundError, ValueError):
+        return []
+    return [m.name for m in parse_models_config(cfg.get("models") or {})]
+
+
+def _local_provider_names(store) -> list[str]:
+    """Provider names from providers.yaml (for status display)."""
+    try:
+        pdata = store.load_providers_config()
+    except (FileNotFoundError, ValueError):
+        return []
+    return [p.get("name") for p in pdata.get("providers", []) if p.get("name")]
 
 
 def _validate_providers_config(pdata, gateway=None) -> list[str]:

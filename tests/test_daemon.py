@@ -141,8 +141,8 @@ class TestGetControlPort:
 class TestStop:
     """DaemonManager.stop()"""
 
-    def test_cleanup_after_api_call(self, tmp_path):
-        """stop() POSTs to the gateway port's /api/daemon/stop and removes the PID file."""
+    def test_stop_cleans_pid_file_via_signal(self, tmp_path):
+        """stop() shuts down via SIGTERM (no HTTP control API) and removes the PID file."""
         pid_file = tmp_path / "daemon.pid"
         pid_file.write_text(json.dumps({"pid": 9999, "port": 23456}))
         from llmport.daemon import DaemonManager
@@ -151,12 +151,9 @@ class TestStop:
         with patch.object(os, "kill", side_effect=OSError()), patch.object(
             time, "sleep"
         ), patch("llmport.daemon.httpx.Client") as MockClient:
-            mock_client_instance = MockClient.return_value
-            mock_client_cm = mock_client_instance.__enter__.return_value
             dm.stop()
-            mock_client_cm.post.assert_called_once_with(
-                "http://127.0.0.1:23456/api/daemon/stop"
-            )
+            # Control is via signals, not HTTP: no request is made.
+            MockClient.return_value.__enter__.return_value.post.assert_not_called()
         assert not pid_file.exists()
 
     def test_malformed_json(self, tmp_path):
@@ -176,7 +173,7 @@ class TestStart:
     """DaemonManager.start()"""
 
     def test_start_returns_true_when_ready(self, tmp_path):
-        """start() returns True once /api/status answers 200 and our daemon is alive."""
+        """start() returns True once /health answers 200 and our daemon is alive."""
         from llmport.daemon import DaemonManager
 
         dm = DaemonManager(config_dir=str(tmp_path))
@@ -189,7 +186,7 @@ class TestStart:
             MockPopen.assert_called_once()
 
     def test_start_returns_false_when_port_held_by_other_process(self, tmp_path):
-        """If /api/status answers but our daemon is not alive (port held by
+        """If /health answers but our daemon is not alive (port held by
         another process), start() must report failure, not false success."""
         from llmport.daemon import DaemonManager
 
@@ -210,7 +207,7 @@ class TestStart:
              patch("llmport.daemon.httpx.Client") as MockClient, \
              patch("llmport.daemon.time.sleep"), \
              patch("llmport.daemon.time.monotonic", side_effect=[0, 0, 100]):
-            # /api/status keeps failing -> loop body raises -> never ready
+            # /health keeps failing -> loop body raises -> never ready
             MockClient.return_value.__enter__.return_value.get.side_effect = Exception
             assert dm.start() is False
 
@@ -338,7 +335,7 @@ class TestGetStatus:
         assert await dm.async_get_status() == {"running": False}
 
     def test_get_status_running(self, tmp_path):
-        """get_status merges the control API response when running."""
+        """get_status merges the /health liveness response when running."""
         pid_file = tmp_path / "daemon.pid"
         pid_file.write_text(json.dumps({"pid": 9999, "port": 23456}))
         from llmport.daemon import DaemonManager
@@ -347,11 +344,10 @@ class TestGetStatus:
         with patch.object(os, "kill"), patch("llmport.daemon.httpx.Client") as MockClient:
             resp = MockClient.return_value.__enter__.return_value.get.return_value
             resp.status_code = 200
-            resp.json.return_value = {"request_count": 5, "models": ["gpt-x"]}
+            resp.json.return_value = {"status": "ok"}
             status = dm.get_status()
         assert status["running"] is True
-        assert status["request_count"] == 5
-        assert status["models"] == ["gpt-x"]
+        assert status["status"] == "ok"
 
 
 class TestResolveGateway:

@@ -241,22 +241,25 @@ async def test_forward_delegates(provider):
     """anthropic_handler.forward() delegates to handler_base.forward().
 
     The imported ``_forward`` function is called with
-    ``(body, provider, model_name, path, headers)`` — all positional.
+    ``(body, provider, model_name, path, headers)`` - all positional.
     """
     from llmport.gateway.anthropic_handler import forward
+    from llmport.gateway.handler_base import UpstreamResult
 
     with patch("llmport.gateway.anthropic_handler._forward",
                new_callable=AsyncMock) as mock_fwd:
-        mock_fwd.return_value = ({"content": [{"text": "Hello"}]}, None)
+        mock_fwd.return_value = UpstreamResult(
+            200, b'{"content":[{"text":"Hello"}]}', "application/json", None
+        )
 
-        result, error = await forward(
+        result = await forward(
             {"messages": [{"role": "user", "content": "hi"}]},
             provider,
             "claude-sonnet-5",
         )
 
-    assert result == {"content": [{"text": "Hello"}]}
-    assert error is None
+    assert isinstance(result, UpstreamResult)
+    assert result.status == 200
     mock_fwd.assert_awaited_once()
 
     args, _kwargs = mock_fwd.call_args
@@ -270,49 +273,46 @@ async def test_forward_delegates(provider):
 async def test_forward_delegates_custom_path(provider):
     """anthropic_handler.forward() passes custom path through."""
     from llmport.gateway.anthropic_handler import forward
+    from llmport.gateway.handler_base import UpstreamResult
 
     with patch("llmport.gateway.anthropic_handler._forward",
                new_callable=AsyncMock) as mock_fwd:
-        mock_fwd.return_value = (None, "Anthropic error")
+        mock_fwd.return_value = UpstreamResult(500, b"err", None, None)
 
-        result, error = await forward(
+        result = await forward(
             {}, provider, "claude-sonnet-5", path="/v1/complete"
         )
 
-    assert result is None
-    assert error == "Anthropic error"
+    assert result.status == 500
     args, _kwargs = mock_fwd.call_args
     assert args[3] == "/v1/complete"
 
 
 # ===========================================================================
-# stream() delegation
+# open_stream() delegation
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_stream_delegates(provider):
-    """anthropic_handler.stream() delegates to handler_base.stream()."""
-    from llmport.gateway.anthropic_handler import stream
+async def test_open_stream_delegates(provider):
+    """anthropic_handler.open_stream() delegates to handler_base.open_stream()."""
+    from llmport.gateway.anthropic_handler import open_stream
+    from llmport.gateway.handler_base import OpenedStream
 
-    async def _mock_stream(*a, **kw):
-        yield b"event: ping\n"
-        yield b"data: response\n\n"
+    opened = MagicMock(spec=OpenedStream)
+    with patch("llmport.gateway.anthropic_handler._open_stream",
+               new_callable=AsyncMock) as mock_os:
+        mock_os.return_value = opened
 
-    with patch("llmport.gateway.anthropic_handler._stream") as mock_str:
-        mock_str.return_value = _mock_stream()
-
-        collected = []
-        async for chunk in stream(
+        result = await open_stream(
             {"messages": [{"role": "user", "content": "hi"}]},
             provider,
             "claude-sonnet-5",
-        ):
-            collected.append(chunk)
+        )
 
-    assert collected == [b"event: ping\n", b"data: response\n\n"]
-    mock_str.assert_called_once()
+    assert result is opened
+    mock_os.assert_awaited_once()
 
-    args, _kwargs = mock_str.call_args
+    args, _kwargs = mock_os.call_args
     assert args[2] == "claude-sonnet-5"            # model_name
     assert args[3] == "/v1/messages"               # path
     assert args[4] == {"x-api-key": "sk-ant-test-xyz",

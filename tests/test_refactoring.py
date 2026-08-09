@@ -16,7 +16,7 @@ from llmport.config.store import ConfigStore
 
 
 # ──────────────────────────────────────────────
-# Issue 1: server.py split (state.py + control_api.py)
+# Issue 1: server.py split (state.py + health.py)
 # ──────────────────────────────────────────────
 
 class TestIssue1ServerSplit:
@@ -26,37 +26,27 @@ class TestIssue1ServerSplit:
         from llmport.gateway.state import GatewayState
         assert GatewayState is not None
 
-    def test_control_api_importable(self):
-        """Control API handlers must be importable from llmport.gateway.control_api."""
-        from llmport.gateway.control_api import (
-            control_status,
-            control_daemon_stop,
-            control_daemon_restart,
-        )
-        # Verify each is a callable (async function)
-        for handler in (
-            control_status,
-            control_daemon_stop,
-            control_daemon_restart,
-        ):
-            assert callable(handler), f"{handler.__name__} is not callable"
+    def test_health_module_importable(self):
+        """The health endpoint must be importable from llmport.gateway.health."""
+        from llmport.gateway.health import health
+        assert callable(health), "health endpoint is not callable"
 
-    def test_server_no_longer_defines_gateway_state_class(self):
-        """server.py should import GatewayState from state.py, not define it."""
+    def test_gateway_state_lives_in_state_module(self):
+        """GatewayState is defined in state.py, not server.py."""
+        from llmport.gateway.state import GatewayState
+        assert GatewayState.__module__ == "llmport.gateway.state"
         from llmport.gateway import server
-        assert "GatewayState" in dir(server), (
-            "GatewayState must be accessible from server (imported)"
-        )
-        from llmport.gateway.state import GatewayState as GS
-        assert server.GatewayState is GS, (
-            "server.GatewayState must be the same class as state.GatewayState"
+        assert not hasattr(server, "GatewayState"), (
+            "server.py should not import GatewayState (it only needs "
+            "init_state/get_state)"
         )
 
     def test_create_app_still_functions_after_split(self):
         """After the split, create_app() must still work correctly.
 
         The gateway now uses a single-app/single-port design: create_app()
-        returns one Starlette app that serves both protocol and /api/* routes.
+        returns one Starlette app that serves the protocol routes plus a
+        read-only /health probe.
         """
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
@@ -74,7 +64,7 @@ class TestIssue1ServerSplit:
             # The single app serves both protocol and control routes
             paths = {r.path for r in app.routes}
             assert "/openai/v1/chat/completions" in paths
-            assert "/api/status" in paths
+            assert "/health" in paths
 
 
 # ──────────────────────────────────────────────
@@ -84,10 +74,10 @@ class TestIssue1ServerSplit:
 class TestIssue2HandlerBase:
 
     def test_handler_base_exists(self):
-        """handler_base.py must exist with forward() and stream() functions."""
-        from llmport.gateway.handler_base import forward, stream
+        """handler_base.py must exist with forward() and open_stream() functions."""
+        from llmport.gateway.handler_base import forward, open_stream
         assert callable(forward)
-        assert callable(stream)
+        assert callable(open_stream)
 
     def test_openai_handler_imports_from_handler_base(self):
         """openai_handler must import forward/stream from handler_base (no
@@ -115,33 +105,34 @@ class TestIssue2HandlerBase:
 # ──────────────────────────────────────────────
 
 class TestIssue3SdkPaths:
+    """SDK alias paths (/v1/*) were removed; only explicit protocol prefixes remain."""
 
-    def test_v1_chat_completions_route(self):
-        """The single app must expose /v1/chat/completions (SDK compat)."""
+    def test_v1_chat_completions_alias_removed(self):
+        """The /v1/chat/completions SDK alias is no longer registered."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
             from llmport.gateway.server import create_app
             app = create_app(store)
             paths = {r.path for r in app.routes}
-            assert "/v1/chat/completions" in paths, (
-                f"Missing /v1/chat/completions route. Got routes: {paths}"
+            assert "/v1/chat/completions" not in paths, (
+                f"/v1/chat/completions alias was removed. Got routes: {paths}"
             )
 
-    def test_v1_messages_route(self):
-        """The single app must expose /v1/messages (SDK compat)."""
+    def test_v1_messages_alias_removed(self):
+        """The /v1/messages SDK alias is no longer registered."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
             from llmport.gateway.server import create_app
             app = create_app(store)
             paths = {r.path for r in app.routes}
-            assert "/v1/messages" in paths, (
-                f"Missing /v1/messages route. Got routes: {paths}"
+            assert "/v1/messages" not in paths, (
+                f"/v1/messages alias was removed. Got routes: {paths}"
             )
 
-    def test_old_prefixed_paths_still_exist(self):
-        """Old /openai/v1/* and /anthropic/v1/* paths must still work."""
+    def test_prefixed_paths_still_exist(self):
+        """The explicit /openai/v1/* and /anthropic/v1/* paths remain."""
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()

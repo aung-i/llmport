@@ -1,5 +1,7 @@
 """Tests for gateway router."""
 
+import time
+
 import pytest
 from llmport.models.provider import ProviderConfig, ProviderHealth
 from llmport.models.model import LogicalModel, ModelBinding
@@ -73,8 +75,15 @@ def test_resolve_missing_model_raises():
         router.resolve("")
 
 
-def test_try_fallback_finds_next():
+# ---------------------------------------------------------------------------
+# ProviderHealth.is_down / mark_down (runtime cooldown vs permanent SSRF)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_down_makes_provider_skipped():
+    """A runtime mark_down() makes resolve skip the provider (cooldown active)."""
     p1 = make_provider("a")
+    p1.health.mark_down(30)
     p2 = make_provider("b")
     model = LogicalModel(
         name="shared",
@@ -84,78 +93,36 @@ def test_try_fallback_finds_next():
         ],
     )
     router = Router([p1, p2], [model])
-    result = router.try_fallback("shared", ("a", "a-model"))
-    assert result is not None
-    assert result[0].name == "b"
-    assert result[1] == "b-model"
+    provider, _ = router.resolve("shared")
+    assert provider.name == "b"  # a is down -> skip to b
 
 
-def test_try_fallback_skips_down_provider():
+def test_runtime_down_recovers_after_cooldown():
+    """Once down_until is in the past, the provider is healthy again."""
     p1 = make_provider("a")
-    p2 = make_provider("b", health="down")
-    p3 = make_provider("c")
-    model = LogicalModel(
-        name="shared",
-        bindings=[
-            ModelBinding(provider="a", upstream="a-model"),
-            ModelBinding(provider="b", upstream="b-model"),
-            ModelBinding(provider="c", upstream="c-model"),
-        ],
-    )
-    router = Router([p1, p2, p3], [model])
-    result = router.try_fallback("shared", ("a", "a-model"))
-    assert result is not None
-    assert result[0].name == "c"
-    assert result[1] == "c-model"
+    p1.health.mark_down(30)
+    # Simulate cooldown expiry.
+    p1.health.down_until = time.time() - 1
+    assert p1.health.is_down() is False
 
-
-def test_try_fallback_same_provider_next_upstream():
-    """Multiple upstreams on one provider are tried in turn before crossing."""
-    p1 = make_provider("a")
-    p2 = make_provider("b")
-    model = LogicalModel(
-        name="shared",
-        bindings=[
-            ModelBinding(provider="a", upstream="a-deploy"),
-            ModelBinding(provider="a", upstream="a-turbo"),
-            ModelBinding(provider="b", upstream="b-model"),
-        ],
-    )
-    router = Router([p1, p2], [model])
-    # a-deploy fails -> a-turbo (same provider, next upstream)
-    r1 = router.try_fallback("shared", ("a", "a-deploy"))
-    assert r1 is not None
-    assert r1[0].name == "a"
-    assert r1[1] == "a-turbo"
-    # a-turbo fails -> b (cross provider)
-    r2 = router.try_fallback("shared", ("a", "a-turbo"))
-    assert r2 is not None
-    assert r2[0].name == "b"
-    assert r2[1] == "b-model"
-
-
-def test_try_fallback_exhausted_returns_none():
-    p1 = make_provider("a")
     model = LogicalModel(
         name="shared",
         bindings=[ModelBinding(provider="a", upstream="a-model")],
     )
     router = Router([p1], [model])
-    result = router.try_fallback("shared", ("a", "a-model"))
-    assert result is None
+    provider, _ = router.resolve("shared")
+    assert provider.name == "a"  # recovered
 
 
-def test_try_fallback_unknown_model_returns_none():
-    router = Router([], [])
-    assert router.try_fallback("nope", ("a", "a-model")) is None
+def test_permanent_down_never_recovers():
+    """SSRF-style permanent down (down_until None) never recovers."""
+    p1 = make_provider("a")
+    p1.health.status = "down"
+    p1.health.down_until = None  # permanent
+    # Even far in the past it stays down.
+    assert p1.health.is_down() is True
 
 
-def test_try_fallback_missing_model_returns_none():
-    router = Router([], [])
-    assert router.try_fallback(None, ("a", "a-model")) is None
-    assert router.try_fallback("", ("a", "a-model")) is None
-
-
-def test_try_fallback_none_binding_returns_none():
-    router = Router([], [])
-    assert router.try_fallback("shared", None) is None
+def test_is_down_false_for_up():
+    p = make_provider("a")
+    assert p.health.is_down() is False

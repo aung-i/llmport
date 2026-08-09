@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from llmport.gateway.handler_base import forward, stream
+from llmport.gateway.handler_base import forward, open_stream, UpstreamResult, OpenedStream
 from llmport.models.provider import ProviderConfig
 
 
@@ -41,17 +41,18 @@ def _async_gen(*items):
 
 @pytest.mark.asyncio
 async def test_forward_success(provider):
-    """forward() returns (response_body, None) on 2xx."""
+    """forward() returns UpstreamResult with the real status + body on 2xx."""
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"choices": [{"text": "Hello"}]}
+    mock_resp.content = b'{"choices":[{"text":"Hello"}]}'
+    mock_resp.headers = {"content-type": "application/json"}
 
     with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
         mock_client = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_client
         mock_client.post.return_value = mock_resp
 
-        result, error = await forward(
+        result = await forward(
             {"messages": [{"role": "user", "content": "hi"}]},
             provider,
             "gpt-5",
@@ -59,10 +60,12 @@ async def test_forward_success(provider):
             {"Authorization": "Bearer test"},
         )
 
-    assert result == {"choices": [{"text": "Hello"}]}
-    assert error is None
+    assert isinstance(result, UpstreamResult)
+    assert result.status == 200
+    assert result.body == b'{"choices":[{"text":"Hello"}]}'
+    assert result.content_type == "application/json"
+    assert result.reason is None
 
-    # URL is the first positional arg
     args, kwargs = mock_client.post.call_args
     assert args[0] == "https://api.example.com/v1/chat/completions"
     # model injected into JSON body
@@ -73,94 +76,106 @@ async def test_forward_success(provider):
 
 
 @pytest.mark.asyncio
-async def test_forward_error_status(provider):
-    """forward() returns (None, error_string) on 4xx/5xx."""
+async def test_forward_error_status_keeps_real_status_and_body(provider):
+    """forward() returns the real upstream status + body on 4xx/5xx (no synthesized string)."""
     mock_resp = MagicMock()
     mock_resp.status_code = 429
-    mock_resp.text = "Rate limited"
+    mock_resp.content = b'{"error":"rate limited"}'
+    mock_resp.headers = {"content-type": "application/json"}
 
     with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
         mock_client = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_client
         mock_client.post.return_value = mock_resp
 
-        result, error = await forward(
+        result = await forward(
             {"messages": []}, provider, "gpt-5", "/v1/chat/completions", {}
         )
 
-    assert result is None
-    assert "Provider returned 429" in error
-    assert "Rate limited" in error
+    assert result.status == 429
+    assert result.body == b'{"error":"rate limited"}'
+    assert result.reason is None
 
 
 @pytest.mark.asyncio
 async def test_forward_timeout(provider):
-    """forward() returns (None, "Provider timeout") on httpx.TimeoutException."""
+    """forward() returns status=None, reason='timeout' on httpx.TimeoutException."""
     with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
         mock_client = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_client
         mock_client.post.side_effect = httpx.TimeoutException("timed out")
 
-        result, error = await forward(
+        result = await forward(
             {"messages": []}, provider, "gpt-5", "/v1/chat/completions", {}
         )
 
-    assert result is None
-    assert error == "Provider timeout"
+    assert result.status is None
+    assert result.reason == "timeout"
+    assert result.body == b""
 
 
 @pytest.mark.asyncio
 async def test_forward_connect_error(provider):
-    """forward() returns (None, "Provider unreachable") on httpx.ConnectError."""
+    """forward() returns status=None, reason='unreachable' on httpx.ConnectError."""
     with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
         mock_client = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_client
         mock_client.post.side_effect = httpx.ConnectError("connection refused")
 
-        result, error = await forward(
+        result = await forward(
             {"messages": []}, provider, "gpt-5", "/v1/chat/completions", {}
         )
 
-    assert result is None
-    assert error == "Provider unreachable"
+    assert result.status is None
+    assert result.reason == "unreachable"
 
 
 # ===========================================================================
-# stream() tests
+# open_stream() tests
 # ===========================================================================
+
+def _mock_opened(status, *, body=b"", chunks=None, content_type="text/event-stream"):
+    """Build a real OpenedStream backed by mock resp/client."""
+    resp = MagicMock()
+    resp.status_code = status
+    resp.headers = {"content-type": content_type}
+    resp.aread = AsyncMock(return_value=body)
+    if chunks is not None:
+        resp.aiter_bytes = lambda: _async_gen(*chunks)
+    resp.aclose = AsyncMock()
+    client = MagicMock()
+    client.aclose = AsyncMock()
+    return OpenedStream(resp, client)
+
 
 @pytest.mark.asyncio
-async def test_stream_success(provider):
-    """stream() yields raw SSE chunks on 2xx."""
+async def test_open_stream_success(provider):
+    """open_stream() returns an OpenedStream whose aiter_bytes yields SSE chunks."""
     chunks = [b'data: {"key":"value"}\n\n', b"data: [DONE]\n\n"]
+    opened = _mock_opened(200, chunks=chunks)
 
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.aiter_bytes = lambda: _async_gen(*chunks)
+    mock_client = MagicMock()
+    mock_client.build_request.return_value = MagicMock()
+    mock_client.send = AsyncMock(return_value=opened._resp)
+    mock_client.aclose = AsyncMock()
 
-    stream_cm = MagicMock()
-    stream_cm.__aenter__.return_value = mock_resp
-
-    stream_mock = MagicMock(return_value=stream_cm)
-
-    with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_client
-        mock_client.stream = stream_mock
-
-        collected = []
-        async for chunk in stream(
+    with patch("llmport.gateway.handler_base.httpx.AsyncClient", return_value=mock_client):
+        result = await open_stream(
             {"messages": [{"role": "user", "content": "hi"}]},
             provider,
             "gpt-5",
             "/v1/chat/completions",
             {"Authorization": "Bearer test"},
-        ):
-            collected.append(chunk)
+        )
 
+    assert isinstance(result, OpenedStream)
+    assert result.status == 200
+    collected = []
+    async for chunk in result.aiter_bytes():
+        collected.append(chunk)
     assert collected == chunks
 
-    args, kwargs = mock_client.stream.call_args
+    args, kwargs = mock_client.build_request.call_args
     assert args[0] == "POST"
     assert args[1] == "https://api.example.com/v1/chat/completions"
     assert kwargs["json"]["stream"] is True
@@ -170,97 +185,53 @@ async def test_stream_success(provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_error_status(provider):
-    """stream() yields a single [ERROR] event on 4xx/5xx."""
-    mock_resp = MagicMock()
-    mock_resp.status_code = 502
-    mock_resp.aread = AsyncMock(return_value=b"Bad Gateway")
+async def test_open_stream_error_status(provider):
+    """open_stream() returns an OpenedStream even on 4xx/5xx (caller peeks status)."""
+    opened = _mock_opened(502, body=b"Bad Gateway", content_type="text/plain")
 
-    stream_cm = MagicMock()
-    stream_cm.__aenter__.return_value = mock_resp
-    stream_mock = MagicMock(return_value=stream_cm)
+    mock_client = MagicMock()
+    mock_client.build_request.return_value = MagicMock()
+    mock_client.send = AsyncMock(return_value=opened._resp)
+    mock_client.aclose = AsyncMock()
 
-    with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_client
-        mock_client.stream = stream_mock
-
-        collected = []
-        async for chunk in stream(
+    with patch("llmport.gateway.handler_base.httpx.AsyncClient", return_value=mock_client):
+        result = await open_stream(
             {"messages": []}, provider, "gpt-5", "/v1/chat/completions", {}
-        ):
-            collected.append(chunk)
+        )
 
-    assert len(collected) == 1
-    assert b"[ERROR] Provider 502" in collected[0]
-    assert b"Bad Gateway" in collected[0]
+    assert isinstance(result, OpenedStream)
+    assert result.status == 502
+    assert await result.aread() == b"Bad Gateway"
 
 
 @pytest.mark.asyncio
-async def test_stream_timeout(provider):
-    """stream() yields timeout error on httpx.TimeoutException."""
-    with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_client
-        mock_client.stream = MagicMock(side_effect=httpx.TimeoutException("timed out"))
+async def test_open_stream_timeout(provider):
+    """open_stream() returns 'timeout' on httpx.TimeoutException."""
+    mock_client = MagicMock()
+    mock_client.build_request.return_value = MagicMock()
+    mock_client.send = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
+    mock_client.aclose = AsyncMock()
 
-        collected = []
-        async for chunk in stream(
+    with patch("llmport.gateway.handler_base.httpx.AsyncClient", return_value=mock_client):
+        result = await open_stream(
             {"messages": []}, provider, "gpt-5", "/v1/chat/completions", {}
-        ):
-            collected.append(chunk)
+        )
 
-    assert len(collected) == 1
-    assert collected[0] == b"data: [ERROR] Provider timeout\n\n"
+    assert result == "timeout"
+    mock_client.aclose.assert_awaited()
 
 
 @pytest.mark.asyncio
-async def test_stream_connect_error(provider):
-    """stream() yields connect error on httpx.ConnectError."""
-    with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_client
-        mock_client.stream = MagicMock(side_effect=httpx.ConnectError("connection refused"))
+async def test_open_stream_connect_error(provider):
+    """open_stream() returns 'unreachable' on httpx.ConnectError."""
+    mock_client = MagicMock()
+    mock_client.build_request.return_value = MagicMock()
+    mock_client.send = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+    mock_client.aclose = AsyncMock()
 
-        collected = []
-        async for chunk in stream(
+    with patch("llmport.gateway.handler_base.httpx.AsyncClient", return_value=mock_client):
+        result = await open_stream(
             {"messages": []}, provider, "gpt-5", "/v1/chat/completions", {}
-        ):
-            collected.append(chunk)
+        )
 
-    assert len(collected) == 1
-    assert collected[0] == b"data: [ERROR] Provider unreachable\n\n"
-
-
-@pytest.mark.asyncio
-async def test_stream_bytes_input(provider):
-    """stream() accepts bytes input, parses as JSON, and yields chunks."""
-    chunks = [b'data: hello\n\n']
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.aiter_bytes = lambda: _async_gen(*chunks)
-
-    stream_cm = MagicMock()
-    stream_cm.__aenter__.return_value = mock_resp
-    stream_mock = MagicMock(return_value=stream_cm)
-
-    with patch("llmport.gateway.handler_base.httpx.AsyncClient") as mock_cls:
-        mock_client = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_client
-        mock_client.stream = stream_mock
-
-        body_bytes = b'{"messages": [{"role": "user", "content": "hi"}]}'
-        collected = []
-        async for chunk in stream(
-            body_bytes, provider, "gpt-5", "/v1/chat/completions", {}
-        ):
-            collected.append(chunk)
-
-    assert collected == chunks
-
-    # Verify bytes were decoded and model/stream were injected
-    args, kwargs = mock_client.stream.call_args
-    assert kwargs["json"]["model"] == "gpt-5"
-    assert kwargs["json"]["stream"] is True
-    assert "messages" in kwargs["json"]
+    assert result == "unreachable"

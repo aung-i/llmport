@@ -1,13 +1,11 @@
 """Tests for the single-app gateway architecture.
 
-The gateway was refactored from a TWO-app/two-port design (separate
-``gateway_app`` and ``control_app``) to a SINGLE-app/single-port design.
-``create_app(store)`` returns ONE Starlette app that serves both the
-protocol-forwarding routes (``/openai/v1/*``, ``/anthropic/v1/*``,
-``/v1/*``) and the control API (``/api/*``) on a single port.
-
-These tests assert the new design: one app, all routes, no cross-app 404
-isolation (because there is only one app).
+The gateway is a SINGLE-app/single-port design. ``create_app(store)``
+returns ONE Starlette app that serves the protocol-forwarding routes
+(``/openai/v1/*``, ``/anthropic/v1/*``) and a read-only ``/health``
+liveness probe on a single port. Lifecycle control (stop / restart) is
+via process signals from the CLI, not HTTP, so no control surface rides
+on the forwarding port.
 """
 
 import tempfile
@@ -53,23 +51,24 @@ class TestSingleAppStructure:
         finally:
             tmp.cleanup()
 
-    def test_single_app_has_both_protocol_and_control_routes(self):
-        """The one app must contain both /api/* and protocol routes."""
+    def test_single_app_has_protocol_routes_and_health(self):
+        """The one app has the protocol routes + /health, and no /api/* or /v1/* aliases."""
         app, tmp = _make_app()
         try:
             paths = {r.path for r in app.routes}
-            # Control API (read-only status + lifecycle only)
-            assert "/api/status" in paths, "Missing /api/status control route"
-            assert "/api/daemon/stop" in paths, "Missing /api/daemon/stop control route"
-            assert "/api/daemon/restart" in paths, "Missing /api/daemon/restart control route"
             # OpenAI protocol
             assert "/openai/v1/chat/completions" in paths
             assert "/openai/v1/models" in paths
             # Anthropic protocol
             assert "/anthropic/v1/messages" in paths
-            # SDK alias paths
-            assert "/v1/chat/completions" in paths
-            assert "/v1/messages" in paths
+            # Read-only health probe
+            assert "/health" in paths
+            # No HTTP control surface; no SDK aliases.
+            assert "/api/status" not in paths
+            assert "/api/daemon/stop" not in paths
+            assert "/api/daemon/restart" not in paths
+            assert "/v1/chat/completions" not in paths
+            assert "/v1/messages" not in paths
         finally:
             tmp.cleanup()
 
@@ -86,20 +85,21 @@ class TestSingleAppStructure:
 
 
 # ──────────────────────────────────────────────
-# Single app serves both control and protocol routes
+# Single app serves routes
 # ──────────────────────────────────────────────
 
 class TestSingleAppServesAllRoutes:
 
-    def test_get_api_status_returns_200(self):
-        """GET /api/status on the single app returns 200."""
+    def test_get_health_returns_200(self):
+        """GET /health on the single app returns 200 with status ok."""
         app, tmp = _make_app()
         try:
             client = TestClient(app)
-            resp = client.get("/api/status")
+            resp = client.get("/health")
             assert resp.status_code == 200, (
-                f"GET /api/status should return 200, got {resp.status_code}"
+                f"GET /health should return 200, got {resp.status_code}"
             )
+            assert resp.json() == {"status": "ok"}
         finally:
             tmp.cleanup()
 
@@ -115,31 +115,27 @@ class TestSingleAppServesAllRoutes:
         finally:
             tmp.cleanup()
 
-    def test_post_v1_chat_completions_missing_model_returns_400(self):
-        """POST /v1/chat/completions with no model returns 400 (route exists)."""
+    def test_v1_chat_completions_alias_removed(self):
+        """The /v1/chat/completions SDK alias was removed -> 404."""
         app, tmp = _make_app()
         try:
             client = TestClient(app)
             resp = client.post("/v1/chat/completions", json={})
-            assert resp.status_code == 400, (
-                f"POST /v1/chat/completions with missing model should return "
-                f"400 (route exists), got {resp.status_code}"
+            assert resp.status_code == 404, (
+                f"/v1/chat/completions was removed and must 404, got {resp.status_code}"
             )
-            assert resp.status_code != 404, "Route must exist (not 404)"
         finally:
             tmp.cleanup()
 
-    def test_post_v1_messages_missing_model_returns_400(self):
-        """POST /v1/messages with no model returns 400 (route exists)."""
+    def test_v1_messages_alias_removed(self):
+        """The /v1/messages SDK alias was removed -> 404."""
         app, tmp = _make_app()
         try:
             client = TestClient(app)
             resp = client.post("/v1/messages", json={})
-            assert resp.status_code == 400, (
-                f"POST /v1/messages with missing model should return 400 "
-                f"(route exists), got {resp.status_code}"
+            assert resp.status_code == 404, (
+                f"/v1/messages was removed and must 404, got {resp.status_code}"
             )
-            assert resp.status_code != 404, "Route must exist (not 404)"
         finally:
             tmp.cleanup()
 
@@ -186,32 +182,28 @@ class TestSingleAppServesAllRoutes:
 
 
 # ──────────────────────────────────────────────
-# control_api module is importable and endpoint functions exist
+# health module is importable; control_api module is gone
 # ──────────────────────────────────────────────
 
-class TestControlApiModule:
+class TestHealthModule:
 
-    def test_control_api_module_importable(self):
-        """The control_api module must be importable."""
-        from llmport.gateway import control_api
-        assert control_api is not None
+    def test_health_module_importable(self):
+        """The health module must be importable."""
+        from llmport.gateway import health
+        assert health is not None
 
-    def test_control_endpoint_functions_exist(self):
-        """All control endpoint functions must exist and be callable."""
-        from llmport.gateway import control_api
-        expected = [
-            "control_status",
-            "control_daemon_stop",
-            "control_daemon_restart",
-        ]
-        for name in expected:
-            handler = getattr(control_api, name, None)
-            assert handler is not None, f"control_api.{name} is missing"
-            assert callable(handler), f"control_api.{name} is not callable"
+    def test_health_endpoint_function_exists(self):
+        """The health endpoint function must exist and be callable."""
+        from llmport.gateway.health import health as health_handler
+        assert callable(health_handler)
 
-    def test_no_control_switch_model_function(self):
-        """The removed control_switch_model function must not exist."""
-        from llmport.gateway import control_api
-        assert not hasattr(control_api, "control_switch_model"), (
-            "control_switch_model was removed along with /api/models/switch"
-        )
+    def test_control_api_module_removed(self):
+        """The control_api module was removed (control is via CLI/signals)."""
+        import importlib.util
+        assert importlib.util.find_spec("llmport.gateway.control_api") is None
+
+    def test_no_control_endpoint_functions(self):
+        """The control lifecycle functions must not exist on the health module."""
+        from llmport.gateway import health
+        for name in ("control_status", "control_daemon_stop", "control_daemon_restart"):
+            assert not hasattr(health, name), f"health.{name} should not exist"

@@ -264,22 +264,26 @@ async def test_forward_delegates(provider):
     """openai_handler.forward() delegates to handler_base.forward().
 
     The imported ``_forward`` function is called with
-    ``(body, provider, model_name, path, headers)`` — all positional.
+    ``(body, provider, model_name, path, headers)`` - all positional.
     """
     from llmport.gateway.openai_handler import forward
+    from llmport.gateway.handler_base import UpstreamResult
 
     with patch("llmport.gateway.openai_handler._forward",
                new_callable=AsyncMock) as mock_fwd:
-        mock_fwd.return_value = ({"choices": [{"text": "Hello"}]}, None)
+        mock_fwd.return_value = UpstreamResult(
+            200, b'{"choices":[{"text":"Hello"}]}', "application/json", None
+        )
 
-        result, error = await forward(
+        result = await forward(
             {"messages": [{"role": "user", "content": "hi"}]},
             provider,
             "gpt-5",
         )
 
-    assert result == {"choices": [{"text": "Hello"}]}
-    assert error is None
+    assert isinstance(result, UpstreamResult)
+    assert result.status == 200
+    assert result.body == b'{"choices":[{"text":"Hello"}]}'
     mock_fwd.assert_awaited_once()
 
     # All arguments passed positionally
@@ -293,49 +297,46 @@ async def test_forward_delegates(provider):
 async def test_forward_delegates_custom_path(provider):
     """openai_handler.forward() passes custom path through."""
     from llmport.gateway.openai_handler import forward
+    from llmport.gateway.handler_base import UpstreamResult
 
     with patch("llmport.gateway.openai_handler._forward",
                new_callable=AsyncMock) as mock_fwd:
-        mock_fwd.return_value = (None, "error")
+        mock_fwd.return_value = UpstreamResult(502, b"err", None, None)
 
-        result, error = await forward(
+        result = await forward(
             {}, provider, "gpt-5", path="/v1/embeddings"
         )
 
-    assert result is None
-    assert error == "error"
+    assert result.status == 502
     args, _kwargs = mock_fwd.call_args
     assert args[3] == "/v1/embeddings"
 
 
 # ===========================================================================
-# stream() delegation
+# open_stream() delegation
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_stream_delegates(provider):
-    """openai_handler.stream() delegates to handler_base.stream()."""
-    from llmport.gateway.openai_handler import stream
+async def test_open_stream_delegates(provider):
+    """openai_handler.open_stream() delegates to handler_base.open_stream()."""
+    from llmport.gateway.openai_handler import open_stream
+    from llmport.gateway.handler_base import OpenedStream
 
-    async def _mock_stream(*a, **kw):
-        yield b"data: chunk1\n\n"
-        yield b"data: chunk2\n\n"
+    opened = MagicMock(spec=OpenedStream)
+    with patch("llmport.gateway.openai_handler._open_stream",
+               new_callable=AsyncMock) as mock_os:
+        mock_os.return_value = opened
 
-    with patch("llmport.gateway.openai_handler._stream") as mock_str:
-        mock_str.return_value = _mock_stream()
-
-        collected = []
-        async for chunk in stream(
+        result = await open_stream(
             {"messages": [{"role": "user", "content": "hi"}]},
             provider,
             "gpt-5",
-        ):
-            collected.append(chunk)
+        )
 
-    assert collected == [b"data: chunk1\n\n", b"data: chunk2\n\n"]
-    mock_str.assert_called_once()
+    assert result is opened
+    mock_os.assert_awaited_once()
 
-    args, _kwargs = mock_str.call_args
+    args, _kwargs = mock_os.call_args
     assert args[2] == "gpt-5"          # model_name
     assert args[3] == "/v1/chat/completions"   # path
     assert args[4] == {"Authorization": "Bearer sk-test-123"}  # headers

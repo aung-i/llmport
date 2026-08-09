@@ -29,7 +29,7 @@ def _make_store(tmp):
 def test_create_app_returns_single_starlette_app():
     """create_app returns a single Starlette app (not a tuple).
 
-    Both protocol routes and ``/api/*`` control routes live on the same app.
+    Protocol routes and the read-only ``/health`` probe live on the same app.
     """
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(tmp)
@@ -40,9 +40,8 @@ def test_create_app_returns_single_starlette_app():
         assert app.__class__.__name__ == "Starlette"
 
         paths = {r.path for r in app.routes}
-        # Protocol routes are on the same app as control routes.
+        # Protocol routes + health probe on the same app.
         assert "/openai/v1/chat/completions" in paths
         assert "/openai/v1/models" in paths
         assert "/anthropic/v1/messages" in paths
-        assert "/api/status" in paths
-        assert "/api/daemon/stop" in paths
+        assert "/health" in paths
