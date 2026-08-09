@@ -81,7 +81,7 @@ async def forward(
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(
-                url, json=body, headers=headers, allow_redirects=False
+                url, json=body, headers=headers, follow_redirects=False
             )
         except httpx.TimeoutException:
             return UpstreamResult(None, b"", None, "timeout")

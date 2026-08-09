@@ -16,6 +16,7 @@ synthesize a 504.
 """
 
 import hmac
+import json
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -26,7 +27,7 @@ from starlette.routing import Route
 from llmport.config.store import ConfigStore
 from llmport.gateway.router import Router, RouterError
 from llmport.gateway.state import init_state, get_state
-from llmport.gateway import openai_handler, anthropic_handler
+from llmport.gateway import openai_handler, anthropic_handler, translator
 from llmport.gateway.health import health
 from llmport.gateway.handler_base import UpstreamResult, OpenedStream
 
@@ -186,6 +187,126 @@ async def _stream_response(body, provider, model_name, handler, path) -> Respons
 
 
 # ============================================================================
+# Cross-format translation (OpenAI client <-> Anthropic provider, and reverse)
+# ============================================================================
+#
+# When the client's protocol differs from the resolved provider's, the request
+# is translated to the provider's format, forwarded, and the response
+# translated back. The translator (llmport.gateway.translator) is pure
+# functions; this layer just orchestrates and reuses the same handler_base
+# forward/stream primitives. Same-protocol requests skip this entirely.
+
+
+async def _forward_translated(
+    body: dict, provider, model_name: str, *, client_format: str,
+) -> Response:
+    """Forward a cross-format chat request via the translator.
+
+    ``client_format`` is the protocol the client spoke ("openai" or
+    "anthropic"); the provider speaks the other. The request is translated to
+    the provider's format, forwarded, and the response translated back --
+    non-streaming here, streaming via :func:`_stream_translated`.
+    """
+    provider_format = provider.protocol
+    if client_format == "openai" and provider_format == "anthropic":
+        upstream_body = translator.openai_to_anthropic_request(body)
+        handler = anthropic_handler
+        path = "/v1/messages"
+    elif client_format == "anthropic" and provider_format == "openai":
+        upstream_body = translator.anthropic_to_openai_request(body)
+        handler = openai_handler
+        path = "/v1/chat/completions"
+    else:
+        return JSONResponse(
+            {"error": "format translation not applicable"}, status_code=400,
+        )
+
+    requested_model = body.get("model")
+    if body.get("stream", False):
+        return await _stream_translated(
+            upstream_body, provider, model_name, handler, path,
+            client_format, requested_model,
+        )
+    result = await handler.forward(upstream_body, provider, model_name, path)
+    return _passthrough_translated(result, provider, client_format, requested_model)
+
+
+def _passthrough_translated(
+    result, provider, client_format: str, requested_model: str,
+) -> Response:
+    """Translate a non-streaming upstream response into the client's format.
+
+    Availability failures mark the provider down (same as direct passthrough).
+    Upstream errors (>=400) are passed through verbatim in the upstream format
+    -- error-body translation is out of scope (see issue #2).
+    """
+    if result.status is None:
+        return _no_response_response(provider, result.reason)
+    if _is_availability_failure(result.status):
+        provider.health.mark_down(COOLDOWN_SECONDS)
+    if result.status >= 400:
+        return Response(
+            content=result.body, status_code=result.status,
+            media_type=result.content_type or "application/json",
+        )
+    try:
+        upstream_json = json.loads(result.body)
+    except (ValueError, TypeError):
+        return Response(
+            content=result.body, status_code=result.status,
+            media_type=result.content_type or "application/json",
+        )
+    if client_format == "openai":
+        translated = translator.anthropic_to_openai_response(
+            upstream_json, requested_model)
+    else:
+        translated = translator.openai_to_anthropic_response(
+            upstream_json, requested_model)
+    return JSONResponse(translated, status_code=result.status)
+
+
+async def _stream_translated(
+    upstream_body, provider, model_name, handler, path,
+    client_format: str, requested_model: str,
+) -> Response:
+    """Open a translated upstream stream and pipe it back converted.
+
+    A 2xx is converted event-by-event to the client's SSE format; an error
+    status is read in full and passed through verbatim (no error translation).
+    No upstream response yields a 504, same as direct streaming.
+    """
+    opened = await handler.open_stream(upstream_body, provider, model_name, path)
+    if isinstance(opened, str):  # "timeout" | "unreachable"
+        return _no_response_response(provider, opened)
+
+    status = opened.status
+    if status >= 400:
+        error_body = await opened.aread()
+        content_type = opened.content_type
+        await opened.aclose()
+        if _is_availability_failure(status):
+            provider.health.mark_down(COOLDOWN_SECONDS)
+        return Response(
+            content=error_body, status_code=status,
+            media_type=content_type or "application/json",
+        )
+
+    if client_format == "openai":
+        gen = translator.anthropic_stream_to_openai(opened, requested_model)
+    else:
+        gen = translator.openai_stream_to_anthropic(opened, requested_model)
+
+    async def _pipe():
+        try:
+            async for chunk in gen:
+                yield chunk
+        finally:
+            await opened.aclose()
+
+    return StreamingResponse(_pipe(), media_type="text/event-stream")
+
+
+# ============================================================================
 # OpenAI protocol endpoints
 # ============================================================================
 
@@ -206,9 +327,13 @@ async def openai_chat(request: Request) -> Response:
     except RouterError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
+    if provider.protocol == "anthropic":
+        # OpenAI client, Anthropic provider: translate.
+        return await _forward_translated(
+            body, provider, model_name, client_format="openai")
     if provider.protocol != "openai":
         return JSONResponse(
-            {"error": f"Model {requested!r} is on an Anthropic provider, not OpenAI"},
+            {"error": f"Unsupported provider protocol {provider.protocol!r}"},
             status_code=400,
         )
 
@@ -294,9 +419,13 @@ async def anthropic_messages(request: Request) -> Response:
     except RouterError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
+    if provider.protocol == "openai":
+        # Anthropic client, OpenAI provider: translate.
+        return await _forward_translated(
+            body, provider, model_name, client_format="anthropic")
     if provider.protocol != "anthropic":
         return JSONResponse(
-            {"error": f"Model {requested!r} is on an OpenAI provider, not Anthropic"},
+            {"error": f"Unsupported provider protocol {provider.protocol!r}"},
             status_code=400,
         )
 

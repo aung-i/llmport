@@ -42,8 +42,16 @@ def test_full_flow():
         assert any(m["id"] == "test-model" for m in models["data"])
 
 
-def test_protocol_mismatch_error():
-    """Test that requesting OpenAI endpoint with Anthropic provider returns error."""
+def test_protocol_mismatch_translates():
+    """An OpenAI request routed to an Anthropic provider is translated (not 400).
+
+    Previously a protocol mismatch returned 400; now the gateway translates
+    OpenAI<->Anthropic so a single provider serves both interfaces.
+    """
+    import json as _json
+    from unittest.mock import patch
+    from llmport.gateway.handler_base import UpstreamResult
+
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
@@ -59,12 +67,29 @@ def test_protocol_mismatch_error():
         app = create_app(store)
         client = TestClient(app)
 
-        resp = client.post("/openai/v1/chat/completions", json={
-            "model": "claude",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
-        assert resp.status_code == 400
-        assert "Anthropic" in resp.json()["error"]
+        captured = {}
+
+        async def fake_forward(body, provider, model_name, path):
+            captured["body"] = body
+            captured["path"] = path
+            anth = {"id": "msg_1", "type": "message", "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn", "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}
+            return UpstreamResult(200, _json.dumps(anth).encode(),
+                                  "application/json", None)
+
+        with patch("llmport.gateway.server.anthropic_handler.forward",
+                   new=fake_forward):
+            resp = client.post("/openai/v1/chat/completions", json={
+                "model": "claude",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+        assert resp.status_code == 200
+        assert resp.json()["choices"][0]["message"]["content"] == "ok"
+        # Upstream received Anthropic format (translated), not a 400.
+        assert captured["path"] == "/v1/messages"
+        assert captured["body"]["max_tokens"] == 1024
 
 
 def test_stray_legacy_config_enc_is_ignored():

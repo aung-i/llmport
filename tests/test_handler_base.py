@@ -72,7 +72,7 @@ async def test_forward_success(provider):
     assert kwargs["json"]["model"] == "gpt-5"
     assert kwargs["json"]["messages"] == [{"role": "user", "content": "hi"}]
     assert kwargs["headers"] == {"Authorization": "Bearer test"}
-    assert kwargs["allow_redirects"] is False
+    assert kwargs["follow_redirects"] is False
 
 
 @pytest.mark.asyncio
