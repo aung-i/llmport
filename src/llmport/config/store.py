@@ -326,6 +326,52 @@ class ConfigStore:
         _chmod(self.providers_path, 0o600)
 
     # ------------------------------------------------------------------
+    # llmport API key (clients' access key; lives in providers.yaml, 0600)
+    # ------------------------------------------------------------------
+    #
+    # This is llmport's OWN api key -- the credential a client presents to
+    # use the gateway (analogous to an OpenAI/Anthropic api key for their
+    # service). It is distinct from each provider's ``api_key`` (which
+    # authenticates the gateway to the upstream): the top-level ``api_key``
+    # is for client->gateway, ``providers[].api_key`` is for gateway->upstream.
+
+    def load_api_key(self) -> str:
+        """Return llmport's own API key (top-level ``api_key`` in providers.yaml).
+
+        Returns ``""`` when unset (the gateway then enforces no auth, staying
+        backward-compatible with the loopback-only default). Tolerates a
+        missing or unreadable providers.yaml so daemon startup never crashes.
+        """
+        try:
+            pdata = self.load_providers_config()
+        except (FileNotFoundError, ValueError):
+            return ""
+        key = pdata.get("api_key")
+        return key if isinstance(key, str) else ""
+
+    def set_api_key(self, key: str) -> None:
+        """Write llmport's API key (top-level ``api_key`` in providers.yaml).
+
+        Preserves existing providers; only the top-level ``api_key`` is set.
+        """
+        try:
+            pdata = self.load_providers_config()
+        except (FileNotFoundError, ValueError):
+            pdata = {"providers": []}
+        pdata["api_key"] = key
+        self.save_providers_config(pdata)
+
+    def clear_api_key(self) -> None:
+        """Remove llmport's API key from providers.yaml (no-op if absent)."""
+        try:
+            pdata = self.load_providers_config()
+        except (FileNotFoundError, ValueError):
+            return
+        if "api_key" in pdata:
+            del pdata["api_key"]
+            self.save_providers_config(pdata)
+
+    # ------------------------------------------------------------------
     # models convenience (lives in config.yaml's ``models`` section)
     # ------------------------------------------------------------------
 

@@ -15,7 +15,10 @@ when the upstream never responds (timeout / unreachable) does the gateway
 synthesize a 504.
 """
 
+import hmac
+
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse, Response
 from starlette.routing import Route
@@ -30,6 +33,72 @@ from llmport.gateway.handler_base import UpstreamResult, OpenedStream
 # How long (seconds) a provider stays down after a runtime failure before the
 # router retries it.
 COOLDOWN_SECONDS = 30.0
+
+
+# ============================================================================
+# Client auth: llmport's own API key
+# ============================================================================
+
+
+def _extract_api_key(scope: dict) -> str | None:
+    """Pull the client-presented API key from the ASGI request scope.
+
+    Accepts ``Authorization: Bearer <key>`` (OpenAI SDK style) or
+    ``x-api-key: <key>`` (Anthropic SDK style). Returns the raw key string or
+    None. Headers are read straight from the scope (no Request object) so the
+    request body is not consumed -- important for streaming passthrough.
+    """
+    auth = ""
+    xkey = ""
+    for name, value in scope.get("headers", ()):
+        lname = name.decode("latin-1").lower()
+        if lname == "authorization":
+            auth = value.decode("latin-1")
+        elif lname == "x-api-key":
+            xkey = value.decode("latin-1")
+    if auth.lower().startswith("bearer "):
+        candidate = auth[7:].strip()
+        if candidate:
+            return candidate
+    if xkey:
+        return xkey.strip()
+    return None
+
+
+class APIKeyAuthMiddleware:
+    """Pure-ASGI middleware enforcing llmport's API key when one is set.
+
+    When ``state.api_key`` is empty (the default), no auth is enforced -- the
+    gateway stays loopback-only and backward-compatible. When set, every
+    forwarding route requires the client to present the key via
+    ``Authorization: Bearer <key>`` or ``x-api-key: <key>``; ``/health`` is
+    always exempt (a liveness probe must work unauthenticated). A missing or
+    mismatched key yields 401. Comparison is constant-time
+    (:func:`hmac.compare_digest`) to avoid a timing side channel.
+
+    Implemented as plain ASGI (not ``BaseHTTPMiddleware``) so streaming SSE
+    responses pass through untouched -- the middleware never buffers the body.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        state = get_state()
+        expected = getattr(state, "api_key", "") or ""
+        if expected and scope.get("path") != "/health":
+            provided = _extract_api_key(scope)
+            if not provided or not hmac.compare_digest(provided, expected):
+                response = JSONResponse(
+                    {"error": "Unauthorized: missing or invalid API key"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 async def _read_json_body(request: Request) -> dict | None:
@@ -265,4 +334,7 @@ def create_app(store: ConfigStore) -> Starlette:
         Route("/health", health, methods=["GET"]),
     ]
 
-    return Starlette(routes=routes)
+    return Starlette(
+        routes=routes,
+        middleware=[Middleware(APIKeyAuthMiddleware)],
+    )

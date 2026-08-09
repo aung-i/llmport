@@ -41,10 +41,12 @@ app = typer.Typer(
 provider_app = typer.Typer(no_args_is_help=True, help="管理供应商（API key 明文存储）")
 model_app = typer.Typer(no_args_is_help=True, help="管理模型映射（公开名 -> 供应商模型）")
 config_app = typer.Typer(no_args_is_help=True, help="配置文件管理（直接编辑 config.yaml）")
+api_key_app = typer.Typer(no_args_is_help=True, help="管理 llmport 自己的 API key（客户端访问 llmport 时出示）")
 
 app.add_typer(provider_app, name="provider")
 app.add_typer(model_app, name="model")
 app.add_typer(config_app, name="config")
+app.add_typer(api_key_app, name="api-key")
 
 
 def _version_callback(value: bool) -> None:
@@ -207,6 +209,27 @@ def _cli_config_edit(
         "config", "--target", "-t", help="编辑哪个文件: config | providers"),
 ) -> None:
     _config_edit(DaemonManager(), target=target)
+
+
+# --- api-key commands ------------------------------------------------------
+
+
+@api_key_app.command("set")
+def _cli_api_key_set() -> None:
+    _api_key_set(DaemonManager())
+
+
+@api_key_app.command("show")
+def _cli_api_key_show(
+    reveal: bool = typer.Option(
+        False, "--reveal", help="显示明文（用于复制到客户端 SDK 配置）"),
+) -> None:
+    _api_key_show(DaemonManager(), reveal=reveal)
+
+
+@api_key_app.command("clear")
+def _cli_api_key_clear() -> None:
+    _api_key_clear(DaemonManager())
 
 
 def main() -> None:
@@ -623,6 +646,54 @@ def _config_edit(dm: DaemonManager, target: str = "config") -> None:
         return
     editor = os.environ.get("EDITOR") or "vi"
     subprocess.call([editor, str(path)])
+
+
+# ============================================================================
+# api-key (llmport's own API key; client->gateway auth)
+# ============================================================================
+
+
+def _api_key_set(dm: DaemonManager) -> None:
+    """Interactively set llmport's API key (no echo)."""
+    store = dm.store
+    _ensure_store_init(store)
+    try:
+        key = getpass.getpass("llmport API key (输入不回显): ").strip()
+    except (EOFError, OSError):
+        print("无法交互读取（非交互式环境）。请直接编辑 providers.yaml 的顶层 api_key。")
+        return
+    if not key:
+        print("未输入 key，已取消。")
+        return
+    store.set_api_key(key)
+    _apply_if_running(dm)
+    print("已设置 llmport API key。客户端请求需携带其一：")
+    print("  OpenAI SDK:    Authorization: Bearer <key>  (或设 OPENAI_API_KEY)")
+    print("  Anthropic SDK: x-api-key: <key>              (或设 ANTHROPIC_API_KEY)")
+
+
+def _api_key_show(dm: DaemonManager, reveal: bool = False) -> None:
+    """Show whether llmport's API key is set (masked unless --reveal)."""
+    key = dm.store.load_api_key()
+    if not key:
+        print("未设置 API key（网关不强制鉴权，纯 loopback）。")
+        return
+    if reveal:
+        print(key)
+    else:
+        masked = (key[:3] + "***" + key[-2:]) if len(key) > 5 else "***"
+        print(f"已设置 API key: {masked}  (用 --reveal 查看明文)")
+
+
+def _api_key_clear(dm: DaemonManager) -> None:
+    """Remove llmport's API key (back to loopback-only, no auth)."""
+    store = dm.store
+    if not store.load_api_key():
+        print("未设置 API key，无需清除。")
+        return
+    store.clear_api_key()
+    _apply_if_running(dm)
+    print("已清除 llmport API key（网关回到纯 loopback 无鉴权）。")
 
 
 # ============================================================================

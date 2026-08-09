@@ -16,6 +16,7 @@ class GatewayState:
         self.providers: list[ProviderConfig] = []
         self.models = []
         self.gateway: dict = {"host": "127.0.0.1", "port": 11434}
+        self.api_key: str = ""  # llmport's own key (client->gateway auth)
         self.started_at = time.time()
         self.reload()
 
@@ -41,6 +42,10 @@ class GatewayState:
         ]
         # api_key lives inside each provider dict (from_dict reads it); no
         # separate secrets vault to inject from.
+        # llmport's OWN api key (client->gateway auth) is the top-level
+        # ``api_key`` in providers.yaml -- "" when unset (no auth enforced).
+        raw_key = pdata.get("api_key")
+        self.api_key = raw_key if isinstance(raw_key, str) else ""
 
         # Defense-in-depth for hand-edited configs: a provider whose base_url
         # is an SSRF risk (metadata / self-loop) is marked "down" so the router
