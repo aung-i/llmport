@@ -342,6 +342,406 @@ class TestOpenaiStreamToAnthropic:
 
 
 # ============================================================================
+# Request translation -- tools & multimodal (Issue #4)
+# ============================================================================
+
+
+class TestOpenaiToAnthropicRequestTools:
+    def test_tools_array_mapped(self):
+        body = {"messages": [{"role": "user", "content": "weather?"}], "tools": [
+            {"type": "function", "function": {
+                "name": "get_weather", "description": "Get weather",
+                "parameters": {"type": "object",
+                               "properties": {"location": {"type": "string"}},
+                               "required": ["location"]}}},
+        ]}
+        out = translator.openai_to_anthropic_request(body)
+        assert out["tools"] == [{
+            "name": "get_weather", "description": "Get weather",
+            "input_schema": {"type": "object",
+                             "properties": {"location": {"type": "string"}},
+                             "required": ["location"]}}]
+
+    def test_tool_choice_variants(self):
+        cases = [
+            ("auto", {"type": "auto"}),
+            ("none", {"type": "none"}),
+            ("required", {"type": "any"}),
+            ({"type": "function", "function": {"name": "get_weather"}},
+             {"type": "tool", "name": "get_weather"}),
+        ]
+        for oai, anth in cases:
+            body = {"messages": [{"role": "user", "content": "x"}],
+                    "tool_choice": oai}
+            assert translator.openai_to_anthropic_request(body)["tool_choice"] == anth
+
+    def test_assistant_tool_calls_become_tool_use_blocks(self):
+        body = {"messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "get_weather",
+                              "arguments": '{"location":"Paris"}'}}]},
+        ]}
+        out = translator.openai_to_anthropic_request(body)
+        msg = out["messages"][1]
+        assert msg["role"] == "assistant"
+        assert msg["content"] == [{
+            "type": "tool_use", "id": "call_1", "name": "get_weather",
+            "input": {"location": "Paris"}}]
+
+    def test_assistant_text_plus_tool_calls(self):
+        body = {"messages": [
+            {"role": "assistant", "content": "Sure, let me check.",
+             "tool_calls": [{"id": "c1", "type": "function",
+                 "function": {"name": "f", "arguments": "{}"}}]},
+        ]}
+        out = translator.openai_to_anthropic_request(body)
+        blocks = out["messages"][0]["content"]
+        assert blocks[0] == {"type": "text", "text": "Sure, let me check."}
+        assert blocks[1]["type"] == "tool_use"
+
+    def test_tool_result_messages_grouped_into_user_message(self):
+        body = {"messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "get_weather", "arguments": "{}"}},
+                {"id": "call_2", "type": "function",
+                 "function": {"name": "get_time", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "noon"},
+        ]}
+        out = translator.openai_to_anthropic_request(body)
+        # Two tool results collapse into one user message with two blocks.
+        last = out["messages"][-1]
+        assert last["role"] == "user"
+        assert last["content"] == [
+            {"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"},
+            {"type": "tool_result", "tool_use_id": "call_2", "content": "noon"}]
+
+
+class TestOpenaiToAnthropicRequestImages:
+    def test_data_url_image_becomes_base64_source(self):
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgo="}},
+        ]}]}
+        out = translator.openai_to_anthropic_request(body)
+        assert out["messages"][0]["content"] == [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png",
+                "data": "iVBORw0KGgo="}}]
+
+    def test_http_url_image_becomes_url_source(self):
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "https://x/a.png"}},
+        ]}]}
+        out = translator.openai_to_anthropic_request(body)
+        assert out["messages"][0]["content"] == [
+            {"type": "image", "source": {"type": "url", "url": "https://x/a.png"}}]
+
+    def test_unsupported_media_type_dropped(self):
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {
+                "url": "data:image/bmp;base64,AAAA"}},
+        ]}]}
+        out = translator.openai_to_anthropic_request(body)
+        assert out["messages"][0]["content"] == ""
+
+    def test_plain_string_content_unchanged(self):
+        out = translator.openai_to_anthropic_request(
+            {"messages": [{"role": "user", "content": "hi"}]})
+        assert out["messages"][0] == {"role": "user", "content": "hi"}
+
+
+class TestAnthropicToOpenaiRequestTools:
+    def test_tools_array_mapped(self):
+        body = {"messages": [{"role": "user", "content": "x"}], "tools": [{
+            "name": "get_weather", "description": "Get weather",
+            "input_schema": {"type": "object", "properties": {}}}]}
+        out = translator.anthropic_to_openai_request(body)
+        assert out["tools"] == [{
+            "type": "function", "function": {
+                "name": "get_weather", "description": "Get weather",
+                "parameters": {"type": "object", "properties": {}}}}]
+
+    def test_tool_choice_variants(self):
+        cases = [
+            ({"type": "auto"}, "auto"),
+            ({"type": "none"}, "none"),
+            ({"type": "any"}, "required"),
+            ({"type": "tool", "name": "get_weather"},
+             {"type": "function", "function": {"name": "get_weather"}}),
+        ]
+        for anth, oai in cases:
+            body = {"messages": [{"role": "user", "content": "x"}],
+                    "tool_choice": anth}
+            assert translator.anthropic_to_openai_request(body)["tool_choice"] == oai
+
+    def test_assistant_tool_use_becomes_tool_calls(self):
+        body = {"messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                 "input": {"location": "Paris"}}]},
+        ]}
+        out = translator.anthropic_to_openai_request(body)
+        msg = out["messages"][1]
+        assert msg["role"] == "assistant"
+        assert msg["content"] is None
+        assert msg["tool_calls"] == [{
+            "id": "toolu_1", "type": "function",
+            "function": {"name": "get_weather",
+                         "arguments": '{"location": "Paris"}'}}]
+
+    def test_assistant_text_plus_tool_use(self):
+        body = {"messages": [
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Checking."},
+                {"type": "tool_use", "id": "t1", "name": "f", "input": {}}]},
+        ]}
+        out = translator.anthropic_to_openai_request(body)
+        msg = out["messages"][0]
+        assert msg["content"] == "Checking."
+        assert msg["tool_calls"][0]["id"] == "t1"
+
+    def test_tool_result_blocks_become_tool_messages(self):
+        body = {"messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1",
+                 "content": "sunny"}]},
+        ]}
+        out = translator.anthropic_to_openai_request(body)
+        assert out["messages"][0] == {
+            "role": "tool", "tool_call_id": "toolu_1", "content": "sunny"}
+
+
+class TestAnthropicToOpenaiRequestImages:
+    def test_base64_image_becomes_data_url(self):
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "see this"},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg", "data": "AAA="}},
+        ]}]}
+        out = translator.anthropic_to_openai_request(body)
+        assert out["messages"][0]["content"] == [
+            {"type": "text", "text": "see this"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/jpeg;base64,AAA="}}]
+
+    def test_url_image_becomes_image_url(self):
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "url", "url": "https://x/a.png"}}],
+        }]}
+        out = translator.anthropic_to_openai_request(body)
+        assert out["messages"][0]["content"] == [
+            {"type": "image_url", "image_url": {"url": "https://x/a.png"}}]
+
+    def test_text_only_blocks_collapse_to_string(self):
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Hello "},
+            {"type": "text", "text": "world"}]}]}
+        out = translator.anthropic_to_openai_request(body)
+        assert out["messages"][0]["content"] == "Hello world"
+
+
+# ============================================================================
+# Response translation -- tools (Issue #4)
+# ============================================================================
+
+
+class TestAnthropicToOpenaiResponseTools:
+    def test_tool_use_becomes_tool_calls(self):
+        body = {
+            "id": "msg_1",
+            "content": [{"type": "tool_use", "id": "toolu_1",
+                         "name": "get_weather", "input": {"location": "Paris"}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 3},
+        }
+        out = translator.anthropic_to_openai_response(body, "claude")
+        msg = out["choices"][0]["message"]
+        assert msg["content"] is None
+        assert msg["tool_calls"] == [{
+            "id": "toolu_1", "type": "function",
+            "function": {"name": "get_weather",
+                         "arguments": '{"location": "Paris"}'}}]
+        assert out["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_text_and_tool_use_combined(self):
+        body = {"content": [
+            {"type": "text", "text": "Let me check."},
+            {"type": "tool_use", "id": "t1", "name": "f", "input": {}}],
+            "stop_reason": "tool_use", "usage": {}}
+        out = translator.anthropic_to_openai_response(body, "m")
+        msg = out["choices"][0]["message"]
+        assert msg["content"] == "Let me check."
+        assert msg["tool_calls"][0]["id"] == "t1"
+
+
+class TestOpenaiToAnthropicResponseTools:
+    def test_tool_calls_become_tool_use_blocks(self):
+        body = {"choices": [{"index": 0, "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "get_weather",
+                             "arguments": '{"location":"Paris"}'}}]},
+            "finish_reason": "tool_calls"}]}
+        out = translator.openai_to_anthropic_response(body, "gpt5")
+        assert out["content"] == [{
+            "type": "tool_use", "id": "call_1", "name": "get_weather",
+            "input": {"location": "Paris"}}]
+        assert out["stop_reason"] == "tool_use"
+
+    def test_text_and_tool_calls_combined(self):
+        body = {"choices": [{"message": {
+            "role": "assistant", "content": "Checking.", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "f", "arguments": "{}"}}]},
+            "finish_reason": "tool_calls"}]}
+        out = translator.openai_to_anthropic_response(body, "m")
+        assert out["content"][0] == {"type": "text", "text": "Checking."}
+        assert out["content"][1]["type"] == "tool_use"
+
+
+# ============================================================================
+# Streaming translation -- tools (Issue #4)
+# ============================================================================
+
+
+def _sse(event_name: str, obj: dict) -> bytes:
+    """Build one Anthropic SSE event (event: + data:) from a dict."""
+    return f"event: {event_name}\ndata: {json.dumps(obj)}\n\n".encode("utf-8")
+
+
+def _oai_sse(obj: dict) -> bytes:
+    """Build one OpenAI SSE data event from a dict."""
+    return f"data: {json.dumps(obj)}\n\n".encode("utf-8")
+
+
+# Anthropic stream emitting a single tool_use block whose input JSON
+# (`{"location":"Paris"}`) arrives split across two input_json_delta fragments.
+_ANTHROPIC_TOOL_SSE = b"".join([
+    _sse("message_start", {"type": "message_start", "message": {
+        "id": "msg_1", "role": "assistant", "model": "claude", "content": [],
+        "stop_reason": None, "usage": {"input_tokens": 5, "output_tokens": 1}}}),
+    _sse("content_block_start", {"type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "toolu_1",
+                          "name": "get_weather", "input": {}}}),
+    _sse("content_block_delta", {"type": "content_block_delta", "index": 0,
+        "delta": {"type": "input_json_delta", "partial_json": '{"location":'}}),
+    _sse("content_block_delta", {"type": "content_block_delta", "index": 0,
+        "delta": {"type": "input_json_delta", "partial_json": '"Paris"}'}}),
+    _sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
+    _sse("message_delta", {"type": "message_delta",
+        "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+        "usage": {"output_tokens": 3}}),
+    _sse("message_stop", {"type": "message_stop"}),
+])
+
+# OpenAI stream emitting a single tool_call whose arguments JSON
+# (`{"location":"Paris"}`) arrives split across two delta.tool_calls fragments.
+_OPENAI_TOOL_SSE = b"".join([
+    _oai_sse({"id": "chatcmpl-1", "object": "chat.completion.chunk",
+        "created": 1, "model": "gpt", "choices": [{"index": 0,
+        "delta": {"role": "assistant", "content": None, "tool_calls": [{
+            "index": 0, "id": "call_1", "type": "function",
+            "function": {"name": "get_weather", "arguments": ""}}]},
+        "finish_reason": None}]}),
+    _oai_sse({"id": "chatcmpl-1", "object": "chat.completion.chunk",
+        "created": 1, "model": "gpt", "choices": [{"index": 0,
+        "delta": {"tool_calls": [{"index": 0,
+            "function": {"arguments": '{"location":'}}]},
+        "finish_reason": None}]}),
+    _oai_sse({"id": "chatcmpl-1", "object": "chat.completion.chunk",
+        "created": 1, "model": "gpt", "choices": [{"index": 0,
+        "delta": {"tool_calls": [{"index": 0,
+            "function": {"arguments": '"Paris"}'}}]},
+        "finish_reason": None}]}),
+    _oai_sse({"id": "chatcmpl-1", "object": "chat.completion.chunk",
+        "created": 1, "model": "gpt", "choices": [{"index": 0,
+        "delta": {}, "finish_reason": "tool_calls"}]}),
+    b"data: [DONE]\n\n",
+])
+
+
+class TestAnthropicStreamToOpenaiTools:
+    async def test_tool_use_emits_tool_calls_with_accumulated_args(self):
+        out = b""
+        async for chunk in translator.anthropic_stream_to_openai(
+            _FakeOpened(200, [_ANTHROPIC_TOOL_SSE]), "claude"
+        ):
+            out += chunk
+        events = _parse_output(out)
+        # Collect tool_calls deltas across chunks.
+        args_by_index = {}
+        name = None
+        tool_id = None
+        finish = None
+        for _ev, data in events:
+            if data == "[DONE]":
+                continue
+            obj = json.loads(data)
+            choice = obj["choices"][0]
+            for tc in choice["delta"].get("tool_calls", []):
+                idx = tc["index"]
+                fn = tc.get("function", {})
+                if "name" in fn:
+                    name = fn["name"]
+                    tool_id = tc.get("id")
+                if "arguments" in fn and fn["arguments"]:
+                    args_by_index.setdefault(idx, "")
+                    args_by_index[idx] += fn["arguments"]
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+        assert name == "get_weather"
+        assert tool_id == "toolu_1"
+        assert args_by_index[0] == '{"location":"Paris"}'
+        assert finish == "tool_calls"
+
+
+class TestOpenaiStreamToAnthropicTools:
+    async def test_tool_calls_emit_tool_use_with_accumulated_partial_json(self):
+        out = b""
+        async for chunk in translator.openai_stream_to_anthropic(
+            _FakeOpened(200, [_OPENAI_TOOL_SSE]), "gpt"
+        ):
+            out += chunk
+        events = _parse_output(out)
+        names = [ev for ev, _ in events]
+        assert names[0] == "message_start"
+        # content_block_start carries the tool_use block with id + name.
+        cbs = next(json.loads(d) for ev, d in events if ev == "content_block_start")
+        assert cbs["content_block"] == {
+            "type": "tool_use", "id": "call_1", "name": "get_weather", "input": {}}
+        # input_json_delta fragments concatenate to the full input JSON.
+        partial = "".join(
+            json.loads(d)["delta"]["partial_json"]
+            for ev, d in events if ev == "content_block_delta"
+        )
+        assert partial == '{"location":"Paris"}'
+        assert "content_block_stop" in names
+        md = next(json.loads(d) for ev, d in events if ev == "message_delta")
+        assert md["delta"]["stop_reason"] == "tool_use"
+        assert names[-1] == "message_stop"
+
+    async def test_tool_only_stream_emits_no_text_block(self):
+        out = b""
+        async for chunk in translator.openai_stream_to_anthropic(
+            _FakeOpened(200, [_OPENAI_TOOL_SSE]), "gpt"
+        ):
+            out += chunk
+        events = _parse_output(out)
+        # No text_delta should appear (the response is tool-only).
+        assert not any(ev == "content_block_delta"
+                       and json.loads(d)["delta"].get("type") == "text_delta"
+                       for ev, d in events)
+
+
+# ============================================================================
 # Route integration (cross-format forwarding)
 # ============================================================================
 
@@ -418,6 +818,67 @@ class TestOpenaiClientAnthropicProvider:
             assert captured["body"]["max_tokens"] == 1024
             assert captured["body"]["messages"] == [
                 {"role": "user", "content": "hi"}]
+
+    def test_tools_round_trip_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app(tmp, _ANTHROPIC_PROVIDER,
+                            {"models": {"claude": {"ant": "claude-sonnet-5"}}})
+            client = AuthedClient(app)
+            captured = {}
+
+            anth_resp = {
+                "id": "msg_2", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-5",
+                "content": [{"type": "tool_use", "id": "toolu_1",
+                             "name": "get_weather",
+                             "input": {"location": "Paris"}}],
+                "stop_reason": "tool_use", "stop_sequence": None,
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            }
+
+            async def fake_forward(body, provider, model_name, path):
+                captured["body"] = body
+                return UpstreamResult(200, json.dumps(anth_resp).encode(),
+                                      "application/json", None)
+
+            with patch("llmport.gateway.server.anthropic_handler.forward",
+                       new=fake_forward):
+                resp = client.post("/openai/v1/chat/completions", json={
+                    "model": "claude",
+                    "messages": [
+                        {"role": "user", "content": "weather in Paris?"},
+                        {"role": "assistant", "content": None, "tool_calls": [{
+                            "id": "call_1", "type": "function",
+                            "function": {"name": "get_weather",
+                                         "arguments": '{"location":"Paris"}'}}]},
+                        {"role": "tool", "tool_call_id": "call_1",
+                         "content": "sunny"},
+                    ],
+                    "tools": [{"type": "function", "function": {
+                        "name": "get_weather", "description": "Get weather",
+                        "parameters": {"type": "object",
+                                       "properties": {"location": {"type": "string"}}}}}],
+                })
+            assert resp.status_code == 200
+            # Upstream received Anthropic-format tools + tool_result.
+            up = captured["body"]
+            assert up["tools"][0]["name"] == "get_weather"
+            assert up["tools"][0]["input_schema"]["properties"] == {
+                "location": {"type": "string"}}
+            assert up["messages"][1]["content"][0] == {
+                "type": "tool_use", "id": "call_1", "name": "get_weather",
+                "input": {"location": "Paris"}}
+            assert up["messages"][2] == {
+                "role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1",
+                     "content": "sunny"}]}
+            # Client received OpenAI-format tool_calls.
+            msg = resp.json()["choices"][0]["message"]
+            assert msg["tool_calls"] == [{
+                "id": "toolu_1", "type": "function",
+                "function": {"name": "get_weather",
+                             "arguments": '{"location": "Paris"}'}}]
+            assert resp.json()["choices"][0]["finish_reason"] == "tool_calls"
 
     def test_stream_translates_sse(self):
         with tempfile.TemporaryDirectory() as tmp:
