@@ -12,12 +12,14 @@ from starlette.testclient import TestClient
 
 from llmport.config.store import ConfigStore
 from llmport.gateway.server import create_app, get_state
+from tests._helpers import TEST_API_KEY, AuthedClient
 
 
 def _make_app(tmp):
     """Create the gateway app with one provider and one model."""
     store = ConfigStore(tmp)
     store.init_first_run()
+    store.set_api_key(TEST_API_KEY)
     store.save_providers_config({
         "version": 1,
         "gateway": {"host": "127.0.0.1", "port": 11434},
@@ -35,13 +37,13 @@ class TestHealthEndpoint:
 
     def test_health_returns_200(self):
         with tempfile.TemporaryDirectory() as tmp:
-            client = TestClient(_make_app(tmp))
+            client = AuthedClient(_make_app(tmp))
             resp = client.get("/health")
             assert resp.status_code == 200
 
     def test_health_returns_status_ok(self):
         with tempfile.TemporaryDirectory() as tmp:
-            client = TestClient(_make_app(tmp))
+            client = AuthedClient(_make_app(tmp))
             data = client.get("/health").json()
             assert data == {"status": "ok"}
 
@@ -77,7 +79,7 @@ class TestControlEndpointsRemoved:
 
     def test_removed_endpoints_return_404(self):
         with tempfile.TemporaryDirectory() as tmp:
-            client = TestClient(_make_app(tmp))
+            client = AuthedClient(_make_app(tmp))
             for path, method in [
                 # Lifecycle control (now via signals from the CLI).
                 ("/api/daemon/stop", "POST"),

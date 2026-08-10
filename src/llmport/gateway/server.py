@@ -67,15 +67,21 @@ def _extract_api_key(scope: dict) -> str | None:
 
 
 class APIKeyAuthMiddleware:
-    """Pure-ASGI middleware enforcing llmport's API key when one is set.
+    """Pure-ASGI middleware enforcing llmport's API key on every request.
 
-    When ``state.api_key`` is empty (the default), no auth is enforced -- the
-    gateway stays loopback-only and backward-compatible. When set, every
-    forwarding route requires the client to present the key via
-    ``Authorization: Bearer <key>`` or ``x-api-key: <key>``; ``/health`` is
-    always exempt (a liveness probe must work unauthenticated). A missing or
-    mismatched key yields 401. Comparison is constant-time
+    Auth is mandatory, never optional. Every forwarding route requires the
+    client to present llmport's API key via ``Authorization: Bearer <key>``
+    (OpenAI SDK style) or ``x-api-key: <key>`` (Anthropic SDK style);
+    ``/health`` is always exempt (a liveness probe must work unauthenticated).
+    A missing or mismatched key yields 401. Comparison is constant-time
     (:func:`hmac.compare_digest`) to avoid a timing side channel.
+
+    If no key is configured at all (``state.api_key`` empty -- a
+    misconfiguration, since ``llmport setup`` generates one and ``start``
+    refuses without one), the middleware fails *closed*: every non-/health
+    route returns 503 rather than serving unauthenticated. This is a
+    defense-in-depth backstop for direct ASGI invocation; the normal start
+    path can't reach it.
 
     Implemented as plain ASGI (not ``BaseHTTPMiddleware``) so streaming SSE
     responses pass through untouched -- the middleware never buffers the body.
@@ -88,17 +94,29 @@ class APIKeyAuthMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+        if scope.get("path") == "/health":
+            await self.app(scope, receive, send)
+            return
         state = get_state()
         expected = getattr(state, "api_key", "") or ""
-        if expected and scope.get("path") != "/health":
-            provided = _extract_api_key(scope)
-            if not provided or not hmac.compare_digest(provided, expected):
-                response = JSONResponse(
-                    {"error": "Unauthorized: missing or invalid API key"},
-                    status_code=401,
-                )
-                await response(scope, receive, send)
-                return
+        if not expected:
+            # No key configured = misconfiguration. Fail closed (503), never
+            # serve unauthenticated. Unreachable via `llmport start` (which
+            # refuses without a key); guards direct ASGI invocation.
+            response = JSONResponse(
+                {"error": "llmport api_key not configured -- run `llmport setup`"},
+                status_code=503,
+            )
+            await response(scope, receive, send)
+            return
+        provided = _extract_api_key(scope)
+        if not provided or not hmac.compare_digest(provided, expected):
+            response = JSONResponse(
+                {"error": "Unauthorized: missing or invalid API key"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
         await self.app(scope, receive, send)
 
 

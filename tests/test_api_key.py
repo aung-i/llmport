@@ -1,13 +1,14 @@
 """Tests for llmport's own API key auth (Issue #1).
 
 Covers:
-  * ConfigStore persistence of the key in its OWN dedicated ``api_key.yaml``
-    (0600), fully separate from ``providers.yaml`` (load / set / clear,
-    provider preservation, tolerance of missing/corrupt file, 0600 mode).
+  * ConfigStore persistence of the key in ``config.yaml`` (the ``api_key``
+    field, alongside gateway/models), fully separate from ``providers.yaml``
+    (load / set / clear, provider preservation, tolerance of missing/corrupt
+    file).
   * GatewayState loading ``api_key`` into runtime state.
-  * APIKeyAuthMiddleware enforcement on the gateway app: no key -> open;
-    key set -> 401 without/wrong credential, 200 with bearer or x-api-key,
-    ``/health`` always open.
+  * APIKeyAuthMiddleware enforcement on the gateway app: no key configured ->
+    503 (fail-closed, never open); key set -> 401 without/wrong credential,
+    200 with bearer or x-api-key, ``/health`` always exempt.
 """
 
 import json as _json
@@ -158,21 +159,22 @@ class TestStateApiKey:
 
 
 class TestNoKeyConfigured:
-    """When no API key is set, the gateway is open (backward compatible)."""
+    """When no API key is set, the gateway fails closed (503), never open.
 
-    def test_request_without_auth_passes(self):
+    Auth is mandatory: a missing key is a misconfiguration, not an open mode.
+    ``/health`` stays exempt (liveness probe).
+    """
+
+    def test_request_without_auth_returns_503(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
             client = TestClient(app)
-            with patch(
-                "llmport.gateway.server.openai_handler.forward",
-                new=AsyncMock(return_value=_ok_upstream()),
-            ):
-                resp = client.post("/openai/v1/chat/completions", json={
-                    "model": "gpt5",
-                    "messages": [{"role": "user", "content": "hi"}],
-                })
-            assert resp.status_code == 200
+            resp = client.post("/openai/v1/chat/completions", json={
+                "model": "gpt5",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+            assert resp.status_code == 503
+            assert "api_key not configured" in resp.json()["error"]
 
     def test_health_open_without_auth(self):
         with tempfile.TemporaryDirectory() as tmp:

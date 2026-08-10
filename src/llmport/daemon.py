@@ -334,6 +334,14 @@ def run_daemon(host: str | None = None, port: int | None = None) -> None:
     store = ConfigStore()
     store.init_first_run()
 
+    # Auth is mandatory: refuse to serve without an API key. This is the
+    # backstop for direct `llmport --daemon` invocation that bypasses the
+    # CLI `start` pre-check. `llmport setup` generates a key.
+    if not store.load_api_key():
+        print("llmport api_key 未设置（鉴权为强制）。请先运行: llmport setup",
+              file=sys.stderr)
+        sys.exit(1)
+
     # In production, host/port arrive on the daemon subprocess argv
     # (`llmport --daemon --host X --port Y`, set by `llmport start`). The
     # eager --daemon callback exits before Typer binds them, so read argv

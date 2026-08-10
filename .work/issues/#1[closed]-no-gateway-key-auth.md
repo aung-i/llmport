@@ -1,6 +1,6 @@
 # 1. llmport 本体无 key 管理
 
-- 状态：closed（2026-08-09 重做关闭）
+- 状态：closed（2026-08-09 二次重开已修正：鉴权从「可选」改为「强制」）
 - 提出时间：2026-08-09
 
 ## 描述
@@ -84,3 +84,52 @@ llmport 网关本体目前没有对客户端做任何鉴权，仅靠 loopback-on
 - 测试：`test_api_key.py` 改为断言 `config.yaml` 存储（持久化、保留 gateway/models、clear、容忍缺失/非字符串）；新增 `test_show_masks_llmport_api_key`（`config show` 不泄漏 key）。全量 **349 passed**，覆盖率 **87.09%**。
 
 向后兼容：未配置 `api_key` 时行为不变（纯 loopback，无鉴权）。
+
+> ⚠️ 上一版（重做）的「向后兼容：未配置 api_key 时行为不变（无鉴权）」结论已被本次二次重开**推翻** -- 见下文。鉴权现在是强制的，不存在不鉴权模式。
+
+## 用户反馈（2026-08-09 二次重开）
+
+> 不考虑不鉴权的情况。那不安全。setup 模板带上这个字段没有
+
+上一版把鉴权做成**可选**（未配置 key = 纯 loopback 无鉴权，向后兼容）。用户明确否决：不鉴权不安全，**不考虑**。鉴权是网关的核心职责，不是可选开关。同时问 setup 模板是否带 `api_key` 字段 -- 答案是只带注释示例、不带真实值；用户决定 **setup 自动生成** 这个强制的 api_key。
+
+## 重做方案（2026-08-09 强制鉴权）
+
+把鉴权从「可选」改为「强制」：**不存在不鉴权模式。** 一个未配置 key 的网关是错误状态，必须 fail-closed，绝不能开放服务。
+
+责任边界（本次明确的划分）：
+- **gateway runtime（真正的安全强制点）**：`APIKeyAuthMiddleware` 始终强制 + `run_daemon` 拒绝无 key 启动。安全靠这两层，不靠 CLI。
+- **CLI `_cmd_start`（UX 前置检查）**：在 providers 检查后加 api_key 检查，给清晰错误信息、避免「spawn 后立刻死」的差体验。是 UX，不是安全边界。
+- **`DaemonManager.start`（进程生命周期层）**：**不**掺入 api_key 检查 -- 那是 config 关切，不是进程关切。保持进程层职责单一。（之前一度想放这里，是边界混淆。）
+
+逐条：
+
+- **middleware（server.py `APIKeyAuthMiddleware`）**：去掉 `if expected`（空=open）分支。除 `/health`（liveness 必须免鉴权）外所有路由始终要求 key。三种结果：
+  - 未配置 key（`state.api_key` 为空，错误状态）-> **503** fail-closed（`api_key not configured -- run llmport setup`），绝不开放。
+  - key 配置了但缺失/错误 -> **401**。
+  - 正确 -> 放行。`hmac.compare_digest` 常量时间比较。纯 ASGI，不缓冲 SSE。
+- **setup（cli.py `_cmd_setup`）**：`_ensure_store_init` 后，若无 key 则 `generate_api_key()` 生成并写入 `config.yaml`，**打印明文**供用户复制到 SDK（OpenAI `Authorization: Bearer` / Anthropic `x-api-key`）。已有 key 不覆盖。
+- **generate_api_key（store.py）**：`sk-llmport-` + `secrets.token_urlsafe(32)`（~43 char 熵）。模块级函数。
+- **start 拒绝（cli.py `_cmd_start`）**：providers 检查后加 `if not load_api_key(): 提示运行 setup; return`。
+- **run_daemon backstop（daemon.py）**：`init_first_run` 后 `if not load_api_key(): stderr + sys.exit(1)`。防直接 `llmport --daemon` 绕过 CLI。
+- **文案修正**：`_CONFIG_TEMPLATE` 注释去掉「留空=不鉴权」，改为「鉴权是强制的，setup 自动生成」；`api-key show`（未设置时）从「不强制鉴权」改为「网关无法启动」；`api-key clear` 从「回到无鉴权」改为「清除后网关无法启动」。
+
+测试改动（强制鉴权波及所有走 ASGI 的测试 -- 它们原来依赖无鉴权）：
+- 新增 `tests/_helpers.py`：`TEST_API_KEY` + `AuthedClient(TestClient 子类)` 默认注入 `x-api-key`。6 个非鉴权测试文件（test_app_isolation / test_control_models / test_fallback_loop / test_integration / test_server_routes / test_translator）的 `_make_app/_make_store` helper 写入 `set_api_key(TEST_API_KEY)`，`TestClient(` -> `AuthedClient(`（42 处）。
+- `test_api_key.py`：`TestNoKeyConfigured` 从断言「无 key = open 200」改为「无 key = 503 fail-closed」；`TestKeyConfigured`（显式 header 的 plain TestClient）不变。
+- 新增：`test_setup_generates_api_key` / `test_setup_preserves_existing_api_key` / `test_start_refuses_without_api_key` / `test_run_daemon_refuses_without_api_key`。
+
+## 结论（2026-08-09 强制鉴权重做）
+
+已把鉴权从可选改为**强制**，不存在不鉴权模式。状态：**关闭**（重开已修正）。
+
+实现：
+- `store.py`：`generate_api_key()`（`secrets.token_urlsafe`）；`_CONFIG_TEMPLATE` / `load_api_key` 文案修正（去掉「不鉴权」）。
+- `server.py`：`APIKeyAuthMiddleware` 始终强制；无 key -> 503 fail-closed；错误/缺失 -> 401；`/health` 免鉴权。
+- `daemon.py`：`run_daemon` 无 key -> `sys.exit(1)`（backstop）。
+- `cli.py`：`setup` 自动生成并打印 key；`_cmd_start` api_key 前置检查；`api-key show/clear` 文案修正；`_ensure_store_init` docstring 修正（不再声称生成 key）。
+
+测试：全量 **353 passed**，覆盖率 **87.43%**。E2E（真实 daemon）验证：`/health` 200（免鉴权）、无 key 401、错 key 401、对 key 200。CLI 冒烟：setup 生成+打印 key、`api-key show --reveal` 回显、有 provider 无 key 时 start 拒绝且不 spawn。
+
+安全模型：未配置 key 的网关无法服务（middleware 503 + run_daemon 拒启动 + start 拒启动）。生产路径（`llmport setup` -> `start`）必然带 key。
+

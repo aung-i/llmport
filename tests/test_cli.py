@@ -143,6 +143,29 @@ class TestSetup:
         invoke(["llmport", "setup"], tmp_path, monkeypatch)
         assert calls == []
 
+    def test_setup_generates_api_key(self, tmp_path, monkeypatch):
+        """setup auto-generates an API key on a fresh install (auth mandatory)."""
+        from llmport.config.store import ConfigStore
+
+        result = invoke(["llmport", "setup"], tmp_path, monkeypatch)
+        store = ConfigStore(str(tmp_path / "llmport"))
+        key = store.load_api_key()
+        assert key.startswith("sk-llmport-")
+        assert len(key) > len("sk-llmport-")  # has random entropy
+        # The generated key is printed so the user can copy it to their SDK.
+        assert key in result.stdout
+        assert "已生成" in result.stdout
+
+    def test_setup_preserves_existing_api_key(self, tmp_path, monkeypatch):
+        """setup must NOT overwrite an existing API key."""
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.init_first_run(config_template=True)
+        store.set_api_key("sk-llmport-preexisting")
+        invoke(["llmport", "setup"], tmp_path, monkeypatch)
+        assert store.load_api_key() == "sk-llmport-preexisting"
+
 
 class TestStartGate:
     """`llmport start` requires setup first."""
@@ -158,6 +181,24 @@ class TestStartGate:
         ConfigStore(str(tmp_path / "llmport")).init_first_run()  # empty config
         result = invoke(["llmport", "start"], tmp_path, monkeypatch)
         assert "尚未配置供应商" in result.stdout
+
+    def test_start_refuses_without_api_key(self, tmp_path, monkeypatch):
+        """With providers configured but no api_key, start refuses (auth mandatory)."""
+        from llmport.config.store import ConfigStore
+
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.init_first_run()
+        store.save_providers_config({
+            "version": 1,
+            "gateway": {"host": "127.0.0.1", "port": 11434},
+            "providers": [{"name": "p", "protocol": "openai",
+                           "base_url": "https://api.example.com", "api_key": "sk"}],
+        })
+        store.save_models_config({"models": {"m": "p"}})
+        # No api_key set -> must refuse before reaching dm.start().
+        result = invoke(["llmport", "start"], tmp_path, monkeypatch)
+        assert "尚未设置 llmport API key" in result.stdout
+        assert "llmport setup" in result.stdout
 
     def test_start_proceeds_when_providers_configured(self, tmp_path, monkeypatch):
         """With a provider configured, start proceeds to dm.start()."""

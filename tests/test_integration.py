@@ -5,6 +5,7 @@ import tempfile
 from llmport.config.store import ConfigStore
 from llmport.gateway.server import create_app
 from starlette.testclient import TestClient
+from tests._helpers import TEST_API_KEY, AuthedClient
 
 
 def test_full_flow():
@@ -12,6 +13,7 @@ def test_full_flow():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
+        store.set_api_key(TEST_API_KEY)
 
         # Add a provider (api_key lives in providers.yaml alongside base_url)
         pdata = store.load_providers_config()
@@ -27,7 +29,7 @@ def test_full_flow():
 
         # Single app serves protocol routes + the /health probe.
         app = create_app(store)
-        client = TestClient(app)
+        client = AuthedClient(app)
 
         # Liveness probe (read-only, no stats).
         resp = client.get("/health")
@@ -55,6 +57,7 @@ def test_protocol_mismatch_translates():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
+        store.set_api_key(TEST_API_KEY)
         pdata = store.load_providers_config()
         pdata["providers"].append({
             "name": "ant",
@@ -65,7 +68,7 @@ def test_protocol_mismatch_translates():
         store.save_providers_config(pdata)
         store.save_models_config({"models": {"claude": {"ant": "claude-real"}}})
         app = create_app(store)
-        client = TestClient(app)
+        client = AuthedClient(app)
 
         captured = {}
 
@@ -166,6 +169,7 @@ def test_first_run_detection_with_empty_providers():
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
+        store.set_api_key(TEST_API_KEY)
         pdata = store.load_providers_config()
         # Fresh config has empty providers - should be detected as first run
         assert pdata.get("providers") == []

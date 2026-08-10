@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 
 from llmport.config.store import ConfigStore
 from llmport.gateway.server import create_app
+from tests._helpers import TEST_API_KEY, AuthedClient
 
 
 def _make_app():
@@ -26,6 +27,7 @@ def _make_app():
     tmp = tempfile.TemporaryDirectory()
     store = ConfigStore(tmp.name)
     store.init_first_run()
+    store.set_api_key(TEST_API_KEY)
     app = create_app(store)
     return app, tmp
 
@@ -94,7 +96,7 @@ class TestSingleAppServesAllRoutes:
         """GET /health on the single app returns 200 with status ok."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/health")
             assert resp.status_code == 200, (
                 f"GET /health should return 200, got {resp.status_code}"
@@ -107,7 +109,7 @@ class TestSingleAppServesAllRoutes:
         """GET /openai/v1/models on the single app returns 200."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/openai/v1/models")
             assert resp.status_code == 200, (
                 f"GET /openai/v1/models should return 200, got {resp.status_code}"
@@ -119,7 +121,7 @@ class TestSingleAppServesAllRoutes:
         """The /v1/chat/completions SDK alias was removed -> 404."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/v1/chat/completions", json={})
             assert resp.status_code == 404, (
                 f"/v1/chat/completions was removed and must 404, got {resp.status_code}"
@@ -131,7 +133,7 @@ class TestSingleAppServesAllRoutes:
         """The /v1/messages SDK alias was removed -> 404."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/v1/messages", json={})
             assert resp.status_code == 404, (
                 f"/v1/messages was removed and must 404, got {resp.status_code}"
@@ -143,7 +145,7 @@ class TestSingleAppServesAllRoutes:
         """POST /openai/v1/chat/completions with no model returns 400 (route exists)."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/openai/v1/chat/completions", json={})
             assert resp.status_code == 400, (
                 f"POST /openai/v1/chat/completions with missing model should "
@@ -157,7 +159,7 @@ class TestSingleAppServesAllRoutes:
         """POST /anthropic/v1/messages with no model returns 400 (route exists)."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/anthropic/v1/messages", json={})
             assert resp.status_code == 400, (
                 f"POST /anthropic/v1/messages with missing model should "
@@ -171,7 +173,7 @@ class TestSingleAppServesAllRoutes:
         """The removed /api/models/switch route returns 404."""
         app, tmp = _make_app()
         try:
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/api/models/switch", json={})
             assert resp.status_code == 404, (
                 f"/api/models/switch was removed and must 404, "

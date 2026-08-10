@@ -16,6 +16,7 @@ from llmport.config.store import ConfigStore
 from llmport.gateway import server as gateway_server
 from llmport.gateway import translator
 from llmport.gateway.handler_base import UpstreamResult
+from tests._helpers import TEST_API_KEY, AuthedClient
 
 
 # ============================================================================
@@ -366,6 +367,7 @@ _OPENAI_PROVIDER = {
 def _make_app(tmp: str, providers: dict, models: dict):
     store = ConfigStore(tmp)
     store.init_first_run()
+    store.set_api_key(TEST_API_KEY)
     store.save_providers_config(providers)
     store.save_models_config(models)
     return gateway_server.create_app(store)
@@ -378,7 +380,7 @@ class TestOpenaiClientAnthropicProvider:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, _ANTHROPIC_PROVIDER,
                             {"models": {"claude": {"ant": "claude-sonnet-5"}}})
-            client = TestClient(app)
+            client = AuthedClient(app)
             captured = {}
 
             anth_resp = {
@@ -421,7 +423,7 @@ class TestOpenaiClientAnthropicProvider:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, _ANTHROPIC_PROVIDER,
                             {"models": {"claude": {"ant": "claude-sonnet-5"}}})
-            client = TestClient(app)
+            client = AuthedClient(app)
             fake = _FakeOpened(200, [_ANTHROPIC_SSE])
 
             async def fake_open_stream(body, provider, model_name, path):
@@ -455,7 +457,7 @@ class TestAnthropicClientOpenaiProvider:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, _OPENAI_PROVIDER,
                             {"models": {"gpt5": {"oai": "gpt-5"}}})
-            client = TestClient(app)
+            client = AuthedClient(app)
             captured = {}
 
             oai_resp = {
@@ -497,7 +499,7 @@ class TestAnthropicClientOpenaiProvider:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, _OPENAI_PROVIDER,
                             {"models": {"gpt5": {"oai": "gpt-5"}}})
-            client = TestClient(app)
+            client = AuthedClient(app)
             fake = _FakeOpened(200, [_OPENAI_SSE])
 
             async def fake_open_stream(body, provider, model_name, path):
@@ -529,7 +531,7 @@ class TestSameProtocolUnchanged:
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, _OPENAI_PROVIDER,
                             {"models": {"gpt5": {"oai": "gpt-5"}}})
-            client = TestClient(app)
+            client = AuthedClient(app)
             captured = {}
 
             async def fake_forward(body, provider, model_name, path):

@@ -18,6 +18,7 @@ from typing import Literal
 import typer
 
 from llmport.daemon import DaemonManager, run_daemon
+from llmport.config.store import generate_api_key
 
 __version__ = "0.1.0"
 
@@ -245,17 +246,35 @@ def _cmd_setup(dm: DaemonManager) -> None:
     """Bootstrap the config directory and template files.
 
     Setup does NOT prompt for providers/models -- that's what ``provider add``
-    and ``model add`` are for. Setup just lays down the files and points the
-    user at the next steps.
+    and ``model add`` are for. Setup lays down the files, ensures an API key
+    exists (generating one on a fresh install -- auth is mandatory), and points
+    the user at the next steps.
     """
     store = dm.store
     _ensure_store_init(store)
 
+    # Auth is mandatory: a fresh install must leave here with an API key.
+    # Generate one if none is set yet; an existing key is never overwritten.
+    key = store.load_api_key()
+    generated = False
+    if not key:
+        key = generate_api_key()
+        store.set_api_key(key)
+        generated = True
+
     print("llmport 设置")
     print(f"配置目录: {store.dir}")
-    print(f"  config.yaml     网关 + 模型映射 (非敏感, 0644)")
+    print(f"  config.yaml     网关 + 模型映射 + llmport api_key (0644)")
     print(f"  providers.yaml  供应商 + API key (0600)")
     print()
+    if generated:
+        print("已生成 llmport API key（鉴权为强制;客户端请求必须携带）:")
+        print(f"  {key}")
+        print("  保存好此 key。用 `llmport api-key show --reveal` 可再次查看。")
+        print("  客户端配置:")
+        print("    OpenAI SDK:    Authorization: Bearer <key>  (或设 OPENAI_API_KEY)")
+        print("    Anthropic SDK: x-api-key: <key>              (或设 ANTHROPIC_API_KEY)")
+        print()
     print("下一步:")
     print("  llmport provider add --name anthropic --protocol anthropic   # 加供应商")
     print("  llmport model add --name claude-sonnet --provider anthropic  # 加模型映射")
@@ -682,7 +701,7 @@ def _api_key_show(dm: DaemonManager, reveal: bool = False) -> None:
     """Show whether llmport's API key is set (masked unless --reveal)."""
     key = dm.store.load_api_key()
     if not key:
-        print("未设置 API key（网关不强制鉴权，纯 loopback）。")
+        print("未设置 API key（鉴权为强制:网关无法启动）。请运行: llmport setup")
         return
     if reveal:
         print(key)
@@ -692,14 +711,14 @@ def _api_key_show(dm: DaemonManager, reveal: bool = False) -> None:
 
 
 def _api_key_clear(dm: DaemonManager) -> None:
-    """Remove llmport's API key (back to loopback-only, no auth)."""
+    """Remove llmport's API key (the gateway will then refuse to start)."""
     store = dm.store
     if not store.load_api_key():
         print("未设置 API key，无需清除。")
         return
     store.clear_api_key()
     _apply_if_running(dm)
-    print("已清除 llmport API key（网关回到纯 loopback 无鉴权）。")
+    print("已清除 llmport API key（鉴权为强制:清除后网关将无法启动，直到重新设置）。")
 
 
 # ============================================================================
@@ -716,6 +735,12 @@ def _cmd_start(dm: DaemonManager, host: str | None = None, port: int | None = No
     pdata = _safe_load_providers(dm.store)
     if not pdata or not pdata.get("providers"):
         print("尚未配置供应商。请先运行: llmport provider add --name <name>")
+        return
+    # Auth is mandatory: refuse to start without an API key. `llmport setup`
+    # generates one; this guards a hand-configured install that skipped setup.
+    if not dm.store.load_api_key():
+        print("尚未设置 llmport API key（鉴权为强制）。请运行: llmport setup")
+        print("  (或手动: llmport api-key set)")
         return
     for w in _validate_providers_config(pdata, dm.store.load_gateway()):
         print(f"警告: {w}")
@@ -801,10 +826,12 @@ def _cmd_status(dm: DaemonManager) -> None:
 
 
 def _ensure_store_init(store) -> None:
-    """Ensure the config dir, key, template config, and vault exist.
+    """Ensure the config dir and commented template files exist.
 
     Delegates to ``store.init_first_run`` (single init path, kept in sync)
     with the commented template so ``setup`` users get a reference config.
+    Does NOT create an API key -- that is ``setup``'s job (auth is mandatory,
+    and only setup generates/prints the key for the user to copy).
     """
     store.init_first_run(config_template=True)
 

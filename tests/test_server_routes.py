@@ -16,6 +16,7 @@ from starlette.testclient import TestClient
 
 from llmport.config.store import ConfigStore
 from llmport.gateway import server as gateway_server
+from tests._helpers import TEST_API_KEY, AuthedClient
 
 
 _BASE_PROVIDERS = {
@@ -42,6 +43,7 @@ def _make_app(tmp: str):
     """
     store = ConfigStore(tmp)
     store.init_first_run()
+    store.set_api_key(TEST_API_KEY)
     store.save_providers_config(_BASE_PROVIDERS)
     store.save_models_config(_BASE_MODELS)
     return gateway_server.create_app(store)
@@ -51,6 +53,7 @@ def _make_store(tmp: str):
     """Create an initialised ConfigStore with the base provider/model."""
     store = ConfigStore(tmp)
     store.init_first_run()
+    store.set_api_key(TEST_API_KEY)
     store.save_providers_config(_BASE_PROVIDERS)
     store.save_models_config(_BASE_MODELS)
     return store
@@ -161,7 +164,7 @@ class TestModelRouting:
         """A chat request without a 'model' field returns 400."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/openai/v1/chat/completions", json={
                 "messages": [{"role": "user", "content": "hi"}],
             })
@@ -172,7 +175,7 @@ class TestModelRouting:
         """A chat request with an unknown model name returns 400."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/openai/v1/chat/completions", json={
                 "model": "does-not-exist",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -184,7 +187,7 @@ class TestModelRouting:
         """A chat request with a known model forwards to openai_handler."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             import json as _json
             from llmport.gateway.handler_base import UpstreamResult
             success = {
@@ -210,7 +213,7 @@ class TestModelRouting:
         """The /v1/* SDK alias paths were removed and now 404."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             assert client.post("/v1/chat/completions", json={"model": "gpt5"}).status_code == 404
             assert client.post("/v1/messages", json={"model": "gpt5"}).status_code == 404
 
@@ -226,7 +229,7 @@ class TestOpenaiModels:
         """Response has top-level 'object' set to 'list'."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/openai/v1/models")
             assert resp.status_code == 200
             body = resp.json()
@@ -236,7 +239,7 @@ class TestOpenaiModels:
         """Response 'data' is a list."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/openai/v1/models")
             body = resp.json()
             assert isinstance(body["data"], list)
@@ -245,7 +248,7 @@ class TestOpenaiModels:
         """Each model from state.models appears in the response, keyed by name."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/openai/v1/models")
             body = resp.json()
 
@@ -258,7 +261,7 @@ class TestOpenaiModels:
         """Every model entry has 'id' and 'object' == 'model'."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/openai/v1/models")
             body = resp.json()
             for entry in body["data"]:
@@ -269,7 +272,7 @@ class TestOpenaiModels:
         """The SDK alias /v1/models is not registered (only openai prefix)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/v1/models")
             # No route registered -> 404
             assert resp.status_code == 404
@@ -278,7 +281,7 @@ class TestOpenaiModels:
         """POST to a path not registered under any prefix returns 404."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             # /v1/models is not registered (only /openai/v1/models)
             resp = client.post("/v1/models")
             assert resp.status_code == 404
@@ -288,9 +291,10 @@ class TestOpenaiModels:
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(tmp)
             store.init_first_run()
+            store.set_api_key(TEST_API_KEY)
             # No models saved -> config.yaml models defaults to empty.
             app = gateway_server.create_app(store)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.get("/openai/v1/models")
             assert resp.status_code == 200
             body = resp.json()
@@ -305,7 +309,7 @@ class TestOpenaiCatchall:
         the ``/openai`` prefix stripped so the upstream sees ``/v1/<path>``."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             from llmport.gateway.handler_base import UpstreamResult
             captured = {}
 
@@ -330,7 +334,7 @@ class TestOpenaiCatchall:
         """A non-JSON body is rejected with 400 (model cannot be read)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post("/openai/v1/embeddings", content=b"not-json")
             assert resp.status_code == 400
 
@@ -338,7 +342,7 @@ class TestOpenaiCatchall:
         """An unknown model in the catchall body returns 400."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp)
-            client = TestClient(app)
+            client = AuthedClient(app)
             resp = client.post(
                 "/openai/v1/embeddings", json={"model": "nope"}
             )

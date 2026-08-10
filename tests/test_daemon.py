@@ -534,3 +534,19 @@ class TestPortAnswersHealth:
         with patch("llmport.daemon.httpx.Client") as MockClient:
             MockClient.return_value.__enter__.return_value.get.side_effect = Exception
             assert dm._port_answers_health(11434) is False
+
+
+class TestRunDaemonApiKeyGuard:
+    """run_daemon refuses to serve without an API key (defense-in-depth for
+    direct `llmport --daemon` that bypasses the CLI start pre-check)."""
+
+    def test_refuses_without_api_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        from llmport.config.store import ConfigStore
+
+        ConfigStore().init_first_run()  # config exists, but no api_key
+        from llmport import daemon
+
+        with pytest.raises(SystemExit) as exc:
+            daemon.run_daemon()
+        assert exc.value.code == 1

@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 from llmport.config.store import ConfigStore
 from llmport.gateway.server import create_app, get_state
 from llmport.gateway.handler_base import UpstreamResult, OpenedStream
+from tests._helpers import TEST_API_KEY, AuthedClient
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +31,7 @@ def _make_app(tmp, provider_specs: list[tuple[str, str]]):
     """
     store = ConfigStore(tmp)
     store.init_first_run()
+    store.set_api_key(TEST_API_KEY)
     pdata = store.load_providers_config()
     pdata["providers"] = [
         {
@@ -78,7 +80,7 @@ class TestNonStreamingPassthrough:
         """A 503 is passed through to the client (real status + body); provider marked down."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai"), ("p2", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
                 if provider.name == "p1":
@@ -99,7 +101,7 @@ class TestNonStreamingPassthrough:
         """A 404 is passed through but the provider is NOT marked down (not availability)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
                 return UpstreamResult(404, b'{"error":"model not found"}', "application/json", None)
@@ -117,7 +119,7 @@ class TestNonStreamingPassthrough:
         """429 (rate limited) is an availability failure -> provider marked down."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
                 return UpstreamResult(429, b'{"error":"rate limited"}', "application/json", None)
@@ -134,7 +136,7 @@ class TestNonStreamingPassthrough:
         """A timeout (no upstream response) yields 504 and marks the provider down."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
                 return UpstreamResult(None, b"", None, "timeout")
@@ -152,7 +154,7 @@ class TestNonStreamingPassthrough:
         """A 2xx body is passed through byte-for-byte."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             async def mock_forward(body, provider, model_name, path="/v1/chat/completions"):
                 return UpstreamResult(200, b'{"id":"ok","choices":[]}', "application/json", None)
@@ -176,7 +178,7 @@ class TestNextRequestFailover:
         """p1 fails (503) on request 1 -> marked down; request 2 routes to p2."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai"), ("p2", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             call_log = []
 
@@ -205,7 +207,7 @@ class TestNextRequestFailover:
         """Within ONE request, a failure is returned to the client (no silent B)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai"), ("p2", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             call_log = []
 
@@ -233,7 +235,7 @@ class TestStreamingPassthrough:
         """A 503 on the stream is returned as 503 + body, not 200 + fake [ERROR] text."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             opened = _opened(503, body=b'{"error":"overloaded"}')
 
@@ -253,7 +255,7 @@ class TestStreamingPassthrough:
         """A 2xx stream is piped through as SSE (200 committed only after success)."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             opened = _opened(200, chunks=[
                 b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
@@ -276,7 +278,7 @@ class TestStreamingPassthrough:
         """A streaming connect failure (no response) yields 504, not 200."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             with patch("llmport.gateway.server.openai_handler.open_stream",
                        new=AsyncMock(return_value="unreachable")):
@@ -293,7 +295,7 @@ class TestStreamingPassthrough:
         """Stream 503 marks p1 down; next (non-stream) request routes to p2."""
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app(tmp, [("p1", "openai"), ("p2", "openai")])
-            client = TestClient(app)
+            client = AuthedClient(app)
 
             call_log = []
 

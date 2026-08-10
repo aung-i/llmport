@@ -26,11 +26,29 @@ config -- see :meth:`_migrate_layout`.
 """
 
 import os
+import secrets
 from pathlib import Path
 
 import yaml
 
 DEFAULT_GATEWAY = {"host": "127.0.0.1", "port": 11434}
+
+# Prefix for llmport's own API keys (the credential a client presents to use
+# the gateway). Matches the ``sk-`` convention of OpenAI/Anthropic keys so it
+# reads naturally in SDK config.
+_API_KEY_PREFIX = "sk-llmport-"
+
+
+def generate_api_key() -> str:
+    """Generate a fresh, random llmport API key.
+
+    ``secrets.token_urlsafe(32)`` yields ~43 chars of URL-safe entropy; the
+    ``sk-llmport-`` prefix marks it as llmport's own key (not an upstream
+    provider key). Used by ``llmport setup`` so a fresh install always has a
+    key -- auth is mandatory, never optional.
+    """
+    return _API_KEY_PREFIX + secrets.token_urlsafe(32)
+
 
 # First-run config.yaml template (non-secret: gateway + models). Commented
 # examples guide the user; the real config stays empty so the gateway starts
@@ -42,8 +60,9 @@ _CONFIG_TEMPLATE = """\
 # gateway: 网关监听地址。始终强制回环(0.0.0.0 等会被改为 127.0.0.1);
 #   也可用 `llmport start --host/--port` 覆盖(优先级: CLI > 此文件 > 默认)。
 #
-# api_key: llmport 自己的 API key,客户端访问网关时出示(留空/不写 = 不鉴权,
-#   纯 loopback)。用 `llmport api-key set` 设置更省事;`config show` 会打码。
+# api_key: llmport 自己的 API key,客户端访问网关时必须出示(鉴权是强制的,
+#   不存在不鉴权模式)。`llmport setup` 会自动生成一个;此处仅作示例。
+#   `config show` 会打码;用 `llmport api-key show --reveal` 查看明文。
 # api_key: sk-llmport-xxxxx
 #
 # models: 公开名 -> 供应商映射。key 是客户端请求时填的 model 名。
@@ -346,9 +365,11 @@ class ConfigStore:
     def load_api_key(self) -> str:
         """Return llmport's own API key (``api_key`` field in config.yaml).
 
-        Returns ``""`` when unset (the gateway then enforces no auth, staying
-        backward-compatible with the loopback-only default). Tolerates a
-        missing or unreadable config.yaml so daemon startup never crashes.
+        Returns ``""`` when unset. An empty key is a *misconfiguration*, not
+        an open mode: ``llmport setup`` generates one, the CLI ``start``
+        refuses without one, ``run_daemon`` refuses to serve, and the
+        middleware answers 503 to every non-/health route. Tolerates a missing
+        or unreadable config.yaml so daemon startup never crashes.
         """
         try:
             cfg = self.load_config()
