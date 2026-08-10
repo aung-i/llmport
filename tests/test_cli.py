@@ -398,6 +398,17 @@ class TestConfigCommands:
         assert "p" in result.stdout
         assert "已设置" in result.stdout  # key-status annotation
 
+    def test_show_masks_llmport_api_key(self, tmp_path, monkeypatch):
+        """llmport's own api_key (stored in config.yaml) is masked in `config
+        show` -- never printed in the clear."""
+        from llmport.config.store import ConfigStore
+        store = ConfigStore(str(tmp_path / "llmport"))
+        store.init_first_run()
+        store.set_api_key("sk-llmport-secret-xyz")
+        result = invoke(["llmport", "config", "show"], tmp_path, monkeypatch)
+        assert "sk-llmport-secret-xyz" not in result.stdout  # not leaked
+        assert "api_key: ***" in result.stdout  # masked
+
     def test_show_without_file(self, tmp_path, monkeypatch):
         result = invoke(["llmport", "config", "show"], tmp_path, monkeypatch)
         assert "尚无配置文件" in result.stdout

@@ -2,19 +2,22 @@
 
 Layout::
 
-    config.yaml       # gateway + models (NO secrets), 0644, committable
-    providers.yaml    # providers (WITH api_key), 0600
+    config.yaml       # gateway + models + llmport api_key, 0644
+    providers.yaml    # upstream providers (WITH their api_key), 0600
 
-The split follows the secret boundary: only ``providers.yaml`` holds secrets,
-so only it is locked down (0600). ``config.yaml`` carries the gateway listen
-address and the public-name -> provider model mappings -- nothing sensitive --
-so it stays 0644 and can be version-controlled or shared. (The config dir
-itself is 0700, so a 0644 file is still owner-only in practice; 0644 is the
-*signal* that the file is non-secret.)
+``providers.yaml`` holds the upstream providers' keys and is locked down
+(0600). ``config.yaml`` carries the gateway listen address, the public-name ->
+provider model mappings, and llmport's own ``api_key`` (the credential a
+client presents to use the gateway). The config dir itself is 0700, so a 0644
+file is still owner-only in practice; ``config show`` masks the ``api_key``
+line so it isn't leaked to the terminal.
 
 Providers are self-contained: ``base_url`` and ``api_key`` live together in
 ``providers.yaml``; ``llmport model test`` reads both files (models from
-``config.yaml``, keys from ``providers.yaml``).
+``config.yaml``, keys from ``providers.yaml``). llmport's own ``api_key``
+authenticates *clients of* the gateway -- unrelated to the upstream providers'
+keys, which is why it lives in ``config.yaml`` and has its own CLI
+(``llmport api-key``).
 
 Legacy ``secrets.yaml`` from the old vault layout is deleted on init. An
 ancient single-file ``config.yaml`` (one containing a ``providers`` key) is
@@ -33,11 +36,15 @@ DEFAULT_GATEWAY = {"host": "127.0.0.1", "port": 11434}
 # examples guide the user; the real config stays empty so the gateway starts
 # clean. Parsed as {version, gateway, models: {}} (comments are ignored).
 _CONFIG_TEMPLATE = """\
-# llmport 配置 (非敏感: 网关地址 + 模型映射, 0644, 可提交/分享)
+# llmport 配置 (网关地址 + 模型映射 + llmport api_key, 0644)
 # 改完重启生效: llmport restart
 #
 # gateway: 网关监听地址。始终强制回环(0.0.0.0 等会被改为 127.0.0.1);
 #   也可用 `llmport start --host/--port` 覆盖(优先级: CLI > 此文件 > 默认)。
+#
+# api_key: llmport 自己的 API key,客户端访问网关时出示(留空/不写 = 不鉴权,
+#   纯 loopback)。用 `llmport api-key set` 设置更省事;`config show` 会打码。
+# api_key: sk-llmport-xxxxx
 #
 # models: 公开名 -> 供应商映射。key 是客户端请求时填的 model 名。
 #   upstream 缺省 = 公开名;多供应商/多 upstream 按顺序 fallback。
@@ -60,9 +67,9 @@ gateway:
 models: {}
 """
 
-# First-run providers.yaml template (secrets: providers + api_key).
+# First-run providers.yaml template (secrets: upstream providers' api_keys).
 _PROVIDERS_TEMPLATE = """\
-# llmport 供应商配置 (含 API key, 0600, 勿提交/分享)
+# llmport 供应商配置 (含供应商 API key, 0600, 勿提交/分享)
 # 改完重启生效: llmport restart
 #
 # providers: 供应商连接信息 + API key,自包含。
@@ -326,50 +333,48 @@ class ConfigStore:
         _chmod(self.providers_path, 0o600)
 
     # ------------------------------------------------------------------
-    # llmport API key (clients' access key; lives in providers.yaml, 0600)
+    # llmport API key (clients' access key; field in config.yaml)
     # ------------------------------------------------------------------
     #
-    # This is llmport's OWN api key -- the credential a client presents to
-    # use the gateway (analogous to an OpenAI/Anthropic api key for their
-    # service). It is distinct from each provider's ``api_key`` (which
-    # authenticates the gateway to the upstream): the top-level ``api_key``
-    # is for client->gateway, ``providers[].api_key`` is for gateway->upstream.
+    # This is llmport's OWN api key -- the credential a client presents to use
+    # the gateway (analogous to an OpenAI/Anthropic api key for their service).
+    # It lives as the ``api_key`` field in ``config.yaml``, alongside the
+    # gateway address and model mappings. It is unrelated to the upstream
+    # providers' ``api_key`` (in providers.yaml), which authenticates the
+    # gateway to each upstream.
 
     def load_api_key(self) -> str:
-        """Return llmport's own API key (top-level ``api_key`` in providers.yaml).
+        """Return llmport's own API key (``api_key`` field in config.yaml).
 
         Returns ``""`` when unset (the gateway then enforces no auth, staying
         backward-compatible with the loopback-only default). Tolerates a
-        missing or unreadable providers.yaml so daemon startup never crashes.
+        missing or unreadable config.yaml so daemon startup never crashes.
         """
         try:
-            pdata = self.load_providers_config()
+            cfg = self.load_config()
         except (FileNotFoundError, ValueError):
             return ""
-        key = pdata.get("api_key")
+        key = cfg.get("api_key")
         return key if isinstance(key, str) else ""
 
     def set_api_key(self, key: str) -> None:
-        """Write llmport's API key (top-level ``api_key`` in providers.yaml).
-
-        Preserves existing providers; only the top-level ``api_key`` is set.
-        """
+        """Write llmport's API key to config.yaml (preserving gateway/models)."""
         try:
-            pdata = self.load_providers_config()
+            cfg = self.load_config()
         except (FileNotFoundError, ValueError):
-            pdata = {"providers": []}
-        pdata["api_key"] = key
-        self.save_providers_config(pdata)
+            cfg = {"version": 1, "gateway": dict(DEFAULT_GATEWAY), "models": {}}
+        cfg["api_key"] = key
+        self.save_config(cfg)
 
     def clear_api_key(self) -> None:
-        """Remove llmport's API key from providers.yaml (no-op if absent)."""
+        """Remove llmport's API key from config.yaml (no-op if absent)."""
         try:
-            pdata = self.load_providers_config()
+            cfg = self.load_config()
         except (FileNotFoundError, ValueError):
             return
-        if "api_key" in pdata:
-            del pdata["api_key"]
-            self.save_providers_config(pdata)
+        if "api_key" in cfg:
+            del cfg["api_key"]
+            self.save_config(cfg)
 
     # ------------------------------------------------------------------
     # models convenience (lives in config.yaml's ``models`` section)

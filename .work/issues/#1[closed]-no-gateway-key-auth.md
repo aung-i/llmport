@@ -1,6 +1,6 @@
 # 1. llmport 本体无 key 管理
 
-- 状态：open
+- 状态：closed（2026-08-09 重做关闭）
 - 提出时间：2026-08-09
 
 ## 描述
@@ -51,3 +51,36 @@ llmport 网关本体目前没有对客户端做任何鉴权，仅靠 loopback-on
 测试：`tests/test_api_key.py` 19 个用例（store 持久化/容忍缺失/非字符串、state 载入、中间件：无 key 开放、有 key 401/200、`/health` 免鉴权、空 bearer 拒绝）。全量 **311 passed**，覆盖率 **90.4%**，零回归。CLI 端到端冒烟通过（set / show masked / reveal / clear，provider 保留，`config show` 自动打码）。
 
 向后兼容：未配置 api_key 时行为与原先完全一致（纯 loopback，无鉴权）。
+
+## 用户反馈（2026-08-09 重开）
+
+> 我觉得这不对，不应该上游 key 混合在一起。要有自己的 key 管理啊。
+
+上一版把 llmport 自己的 API key 存进了 `providers.yaml` 顶层 `api_key` 字段，和上游供应商的 `providers[].api_key` 混在同一个文件里。这是错误的设计：**llmport 自己的 key（客户端->网关）和上游供应商的 key（网关->上游）是两回事，不该共用一个密钥文件。** llmport 应该有自己独立的 key 管理。
+
+## 重做方案（2026-08-09）
+
+把 llmport 自己的 API key 从 `providers.yaml` 抽出来，不再和上游供应商 key 混在一起。
+
+> 方案演进：起初考虑独立文件 `api_key.yaml`（0600），用户反馈「搞复杂了」，最终决定直接放进 `config.yaml`（一个 `api_key` 字段，和 gateway/models 同文件），保持简单。
+
+- **存哪**：`config.yaml` 的 `api_key` 字段（`~/.config/llmport/config.yaml`）。未设置时该字段不存在（= 无鉴权，纯 loopback）。与 `providers.yaml`（上游供应商 key）彻底分开。
+- **ConfigStore**：`load_api_key/set_api_key/clear_api_key` 改为读写 `config.yaml` 的 `api_key` 字段（保留 gateway/models），**完全不碰 providers.yaml**。
+- **GatewayState**：`reload()` 改用 `self.store.load_api_key()`，不再从 providers 数据里取 `api_key`。
+- **CLI**：`api-key set/show/clear` 已走 store 方法，自动生效；提示文案改为指向 `config.yaml`。`config show` 对 `config.yaml` 的 `api_key` 行也打码（原先只打码 providers.yaml）。
+- **边界**：
+  - `config.yaml`（0644）：网关地址 + 模型映射 + **llmport 自己的 api_key**（客户端->网关）。`config show` 打码显示。
+  - `providers.yaml`（0600）：**上游供应商**及其 api_key（网关->上游）。
+- 不做迁移：本特性在分支上、未发布，无存量用户；`providers.yaml` 里若残留顶层 `api_key` 会被直接忽略（不再读取），不会报错。
+
+## 结论（2026-08-09 重做）
+
+已将 llmport 自己的 API key 从 `providers.yaml` 迁到 `config.yaml` 的 `api_key` 字段，与上游供应商 key 彻底分离。状态：**关闭**。
+
+实现：
+- `store.py`：`load_api_key/set_api_key/clear_api_key` 读写 `config.yaml` 的 `api_key` 字段（`save_config` 保留 gateway/models），不碰 `providers.yaml`；移除了上一版的 `key_path`/独立文件设计。
+- `state.py`：`reload()` 用 `self.store.load_api_key()`。
+- `cli.py`：`api-key` 子命令自动生效；`_config_show` 对 `config.yaml` 的 `api_key` 行打码（防泄漏）；`config init` 模板加 `api_key` 注释示例；路径/标签文案更新。
+- 测试：`test_api_key.py` 改为断言 `config.yaml` 存储（持久化、保留 gateway/models、clear、容忍缺失/非字符串）；新增 `test_show_masks_llmport_api_key`（`config show` 不泄漏 key）。全量 **349 passed**，覆盖率 **87.09%**。
+
+向后兼容：未配置 `api_key` 时行为不变（纯 loopback，无鉴权）。

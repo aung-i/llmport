@@ -1,8 +1,9 @@
 """Tests for llmport's own API key auth (Issue #1).
 
 Covers:
-  * ConfigStore persistence of the top-level ``api_key`` in providers.yaml
-    (load / set / clear, provider preservation, tolerance of missing file).
+  * ConfigStore persistence of the key in its OWN dedicated ``api_key.yaml``
+    (0600), fully separate from ``providers.yaml`` (load / set / clear,
+    provider preservation, tolerance of missing/corrupt file, 0600 mode).
   * GatewayState loading ``api_key`` into runtime state.
   * APIKeyAuthMiddleware enforcement on the gateway app: no key -> open;
     key set -> 401 without/wrong credential, 200 with bearer or x-api-key,
@@ -83,24 +84,26 @@ class TestStoreApiKey:
         store.set_api_key("sk-llmport-secret")
         assert store.load_api_key() == "sk-llmport-secret"
 
-    def test_set_persists_to_providers_yaml_top_level(self, tmp_path):
+    def test_set_persists_to_config_yaml(self, tmp_path):
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
         store.save_providers_config(_BASE_PROVIDERS)
         store.set_api_key("sk-llmport-secret")
-        raw = store.providers_path.read_text()
-        # Top-level api_key present alongside providers.
+        raw = store.config_path.read_text()
         assert "api_key: sk-llmport-secret" in raw
-        assert "providers:" in raw
+        # NOT leaked into providers.yaml.
+        assert store.load_providers_config().get("api_key") is None
 
-    def test_set_preserves_existing_providers(self, tmp_path):
+    def test_set_preserves_gateway_and_models(self, tmp_path):
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
-        store.save_providers_config(_BASE_PROVIDERS)
+        store.save_models_config(_BASE_MODELS)
         store.set_api_key("sk-llmport-secret")
-        pdata = store.load_providers_config()
-        assert pdata["providers"] == _BASE_PROVIDERS["providers"]
-        assert pdata["api_key"] == "sk-llmport-secret"
+        cfg = store.load_config()
+        assert cfg["api_key"] == "sk-llmport-secret"
+        # gateway + models survive the write.
+        assert cfg["gateway"]["port"] == 11434
+        assert cfg["models"] == _BASE_MODELS["models"]
 
     def test_clear_removes_key(self, tmp_path):
         store = ConfigStore(str(tmp_path))
@@ -109,10 +112,7 @@ class TestStoreApiKey:
         store.set_api_key("sk-llmport-secret")
         store.clear_api_key()
         assert store.load_api_key() == ""
-        pdata = store.load_providers_config()
-        assert "api_key" not in pdata
-        # Providers survive the clear.
-        assert pdata["providers"] == _BASE_PROVIDERS["providers"]
+        assert "api_key" not in store.load_config()
 
     def test_clear_when_unset_is_noop(self, tmp_path):
         store = ConfigStore(str(tmp_path))
@@ -121,15 +121,17 @@ class TestStoreApiKey:
         store.clear_api_key()  # must not raise
         assert store.load_api_key() == ""
 
-    def test_load_tolerates_missing_providers_file(self, tmp_path):
+    def test_load_tolerates_missing_config_file(self, tmp_path):
         store = ConfigStore(str(tmp_path))
-        # No init, no providers.yaml.
+        # No init, no config.yaml.
         assert store.load_api_key() == ""
 
     def test_load_tolerates_non_string_key(self, tmp_path):
         store = ConfigStore(str(tmp_path))
         store.init_first_run()
-        store.providers_path.write_text("api_key: 12345\nproviders: []\n")
+        store.config_path.write_text(
+            "api_key: 12345\ngateway: {host: 127.0.0.1, port: 11434}\n"
+        )
         assert store.load_api_key() == ""
 
 

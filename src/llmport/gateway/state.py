@@ -42,10 +42,10 @@ class GatewayState:
         ]
         # api_key lives inside each provider dict (from_dict reads it); no
         # separate secrets vault to inject from.
-        # llmport's OWN api key (client->gateway auth) is the top-level
-        # ``api_key`` in providers.yaml -- "" when unset (no auth enforced).
-        raw_key = pdata.get("api_key")
-        self.api_key = raw_key if isinstance(raw_key, str) else ""
+        # llmport's OWN api key (client->gateway auth) lives in its own
+        # dedicated api_key.yaml (0600), separate from providers.yaml.
+        # "" when unset -> no auth enforced (loopback-only default).
+        self.api_key = self.store.load_api_key()
 
         # Defense-in-depth for hand-edited configs: a provider whose base_url
         # is an SSRF risk (metadata / self-loop) is marked "down" so the router

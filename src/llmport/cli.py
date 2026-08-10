@@ -593,8 +593,8 @@ def _config_init(dm: DaemonManager) -> None:
         return
     store.init_first_run(config_template=True)
     print("已生成配置模板:")
-    print(f"  {store.config_path}     (网关 + 模型映射, 非敏感, 0644)")
-    print(f"  {store.providers_path}  (供应商 + API key, 0600)")
+    print(f"  {store.config_path}     (网关 + 模型映射 + llmport api_key, 0644)")
+    print(f"  {store.providers_path}  (供应商 + 供应商 API key, 0600)")
     print("编辑这两个文件填入供应商和模型,然后运行 `llmport start`。")
     print("API key 直接写在 providers.yaml 的 provider 条目里(用 `llmport provider add` 更省事)。")
 
@@ -608,16 +608,22 @@ def _config_show(dm: DaemonManager) -> None:
         print("尚无配置文件。运行 `llmport config init` 生成模板。")
         return
 
+    def _mask(text: str) -> str:
+        # Mask any ``api_key: <value>`` line: llmport's own key in config.yaml
+        # and each provider's key in providers.yaml.
+        return re.sub(r"(api_key:\s*).+", r"\1***", text)
+
     if store.config_path.exists():
-        print(f"# === {store.config_path.name} (非敏感) ===")
+        print(f"# === {store.config_path.name} (api_key 已打码) ===")
         text = store.config_path.read_text(encoding="utf-8")
-        print(text, end="" if text.endswith("\n") else "\n")
+        masked = _mask(text)
+        print(masked, end="" if masked.endswith("\n") else "\n")
 
     if store.providers_path.exists():
         print()
         print(f"# === {store.providers_path.name} (api_key 已打码) ===")
         text = store.providers_path.read_text(encoding="utf-8")
-        masked = re.sub(r"(api_key:\s*).+", r"\1***", text)
+        masked = _mask(text)
         print(masked, end="" if masked.endswith("\n") else "\n")
 
     # Best-effort: annotate which providers have a key set. The key lives in
@@ -660,7 +666,7 @@ def _api_key_set(dm: DaemonManager) -> None:
     try:
         key = getpass.getpass("llmport API key (输入不回显): ").strip()
     except (EOFError, OSError):
-        print("无法交互读取（非交互式环境）。请直接编辑 providers.yaml 的顶层 api_key。")
+        print("无法交互读取（非交互式环境）。请直接编辑 config.yaml 的 api_key 字段。")
         return
     if not key:
         print("未输入 key，已取消。")
