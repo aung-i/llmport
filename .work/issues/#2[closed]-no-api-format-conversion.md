@@ -1,6 +1,6 @@
 # 2. 供应商不支持两种 API 格式自动转换
 
-- 状态：open
+- 状态：closed（2026-08-09 关闭；工具/多模态跨格式翻译已立 #4 跟踪）
 - 提出时间：2026-08-09
 
 ## 描述
@@ -53,6 +53,6 @@
 测试：`tests/test_translator.py` 27 个用例（请求/响应/流式单元 + 路由集成：OpenAI客户端→Anthropic供应商、反向、同协议不转换、流式 SSE 双向、分块不破坏解析）。更新 `test_integration.py`（mismatch 现在翻译而非 400）、`test_handler_base.py`（follow_redirects 断言）。全量 **338 passed**，覆盖率 **87.5%**，零回归。
 
 已知边界（文档化，后续 issue）：
-- 工具调用（tools/tool_calls/tool_use）、多模态（image）跨格式不翻译，请求中这类字段会被丢弃。
+- 工具调用（tools/tool_calls/tool_use）、多模态（image）跨格式不翻译，请求中这类字段会被丢弃。-> **已立 issue #4 跟踪**（原生接口都支持，网关需对齐）。
 - 上游错误响应（>=400）原样透传上游格式（不翻译错误体）。
 - `openai_catchall`（embeddings 等 OpenAI 专有端点）不做跨格式翻译（仍要求 openai 供应商）。
