@@ -129,7 +129,9 @@ llmport 网关本体目前没有对客户端做任何鉴权，仅靠 loopback-on
 - `daemon.py`：`run_daemon` 无 key -> `sys.exit(1)`（backstop）。
 - `cli.py`：`setup` 自动生成并打印 key；`_cmd_start` api_key 前置检查；`api-key show/clear` 文案修正；`_ensure_store_init` docstring 修正（不再声称生成 key）。
 
-测试：全量 **353 passed**，覆盖率 **87.43%**。E2E（真实 daemon）验证：`/health` 200（免鉴权）、无 key 401、错 key 401、对 key 200。CLI 冒烟：setup 生成+打印 key、`api-key show --reveal` 回显、有 provider 无 key 时 start 拒绝且不 spawn。
+测试：全量 **354 passed**，覆盖率 **87.43%**。E2E（真实 daemon）验证：`/health` 200（免鉴权）、无 key 401、错 key 401、对 key 200。CLI 冒烟：setup 生成+打印 key、`api-key show --reveal` 回显、有 provider 无 key 时 start 拒绝且不 spawn。
 
-安全模型：未配置 key 的网关无法服务（middleware 503 + run_daemon 拒启动 + start 拒启动）。生产路径（`llmport setup` -> `start`）必然带 key。
+文件权限修正（安全审查跟进）：api_key 是凭证，写入它的 `config.yaml` 必须是 0600，不能再是原先（仅 gateway/models 非敏感时）的 0644。`save_config` / `write_config_template` 改 0o600；与 `providers.yaml`（0600）一致。0700 目录仍保留作第二层。新增 `test_set_api_key_locks_config_yaml_to_600`。磁盘验证：setup 后 `config.yaml` 600 / `providers.yaml` 600 / 目录 700。
+
+安全模型：未配置 key 的网关无法服务（middleware 503 + run_daemon 拒启动 + start 拒启动）。生产路径（`llmport setup` -> `start`）必然带 key。凭证文件统一 0600。
 

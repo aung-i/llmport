@@ -2,14 +2,14 @@
 
 Layout::
 
-    config.yaml       # gateway + models + llmport api_key, 0644
+    config.yaml       # gateway + models + llmport api_key, 0600
     providers.yaml    # upstream providers (WITH their api_key), 0600
 
-``providers.yaml`` holds the upstream providers' keys and is locked down
-(0600). ``config.yaml`` carries the gateway listen address, the public-name ->
-provider model mappings, and llmport's own ``api_key`` (the credential a
-client presents to use the gateway). The config dir itself is 0700, so a 0644
-file is still owner-only in practice; ``config show`` masks the ``api_key``
+Both files hold credentials and are locked to 0600 (owner read/write only):
+``providers.yaml`` holds the upstream providers' keys, and ``config.yaml``
+holds the gateway listen address, the public-name -> provider model mappings,
+and llmport's own ``api_key`` (the credential a client presents to use the
+gateway). The config dir itself is 0700. ``config show`` masks the ``api_key``
 line so it isn't leaked to the terminal.
 
 Providers are self-contained: ``base_url`` and ``api_key`` live together in
@@ -50,11 +50,11 @@ def generate_api_key() -> str:
     return _API_KEY_PREFIX + secrets.token_urlsafe(32)
 
 
-# First-run config.yaml template (non-secret: gateway + models). Commented
-# examples guide the user; the real config stays empty so the gateway starts
-# clean. Parsed as {version, gateway, models: {}} (comments are ignored).
+# First-run config.yaml template (gateway + models; api_key added by setup).
+# Commented examples guide the user; the real config stays empty so the gateway
+# starts clean. Parsed as {version, gateway, models: {}} (comments are ignored).
 _CONFIG_TEMPLATE = """\
-# llmport 配置 (网关地址 + 模型映射 + llmport api_key, 0644)
+# llmport 配置 (网关地址 + 模型映射 + llmport api_key, 0600)
 # 改完重启生效: llmport restart
 #
 # gateway: 网关监听地址。始终强制回环(0.0.0.0 等会被改为 127.0.0.1);
@@ -262,11 +262,11 @@ class ConfigStore:
                     pass
 
     # ------------------------------------------------------------------
-    # config.yaml (gateway + models, NON-secret, 0644)
+    # config.yaml (gateway + models + llmport api_key, 0600 -- holds a credential)
     # ------------------------------------------------------------------
 
     def load_config(self) -> dict:
-        """Load and return the non-secret config (``{version, gateway, models}``).
+        """Load and return config.yaml (``{version, gateway, models, api_key?}``).
 
         Raises ``FileNotFoundError`` if the file does not exist yet, and
         ``ValueError`` if it is valid YAML but not a mapping, so callers can
@@ -284,13 +284,13 @@ class ConfigStore:
         return data
 
     def save_config(self, data: dict) -> None:
-        """Write the non-secret config (0644)."""
+        """Write config.yaml (0600 -- it holds the llmport api_key credential)."""
         self.dir.mkdir(parents=True, exist_ok=True)
         plaintext = yaml.dump(
             data, default_flow_style=False, allow_unicode=True, sort_keys=False
         )
         _atomic_write_bytes(self.config_path, plaintext.encode("utf-8"))
-        _chmod(self.config_path, 0o644)
+        _chmod(self.config_path, 0o600)
         _chmod(self.dir, 0o700)
 
     def write_config_template(self) -> None:
@@ -298,7 +298,7 @@ class ConfigStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         _atomic_write_bytes(
             self.config_path, _CONFIG_TEMPLATE.encode("utf-8"))
-        _chmod(self.config_path, 0o644)
+        _chmod(self.config_path, 0o600)
 
     # ------------------------------------------------------------------
     # providers.yaml (providers WITH api_key, 0600)
@@ -415,7 +415,7 @@ class ConfigStore:
         return {"models": data.get("models") or {}}
 
     def save_models_config(self, data: dict) -> None:
-        """Write the ``models`` section of ``config.yaml`` (0644).
+        """Write the ``models`` section of ``config.yaml`` (0600).
 
         Preserves the existing gateway/version; only the ``models`` key is
         replaced. Creates ``config.yaml`` with defaults if it does not exist.

@@ -2,7 +2,7 @@
 
 After save, the spec requires:
 - providers.yaml  -> permissions 0o600 (owner read/write only; holds api keys)
-- config.yaml     -> permissions 0o644 (non-secret: gateway + models)
+- config.yaml     -> permissions 0o600 (owner read/write only; holds llmport api_key)
 - directory       -> permissions 0o700 (owner read/write/execute only)
 - Non-POSIX platforms where chmod is unsupported must not raise.
 """
@@ -28,16 +28,20 @@ def test_save_providers_config_sets_providers_yaml_to_600():
         )
 
 
-def test_save_models_config_sets_config_yaml_to_644():
-    """After save_models_config(), config.yaml has permissions 0o644 (non-secret)."""
+def test_save_models_config_sets_config_yaml_to_600():
+    """After save_models_config(), config.yaml has permissions 0o600.
+
+    config.yaml holds the llmport api_key (a credential), so it is locked to
+    0600 like providers.yaml -- not 0644.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         store = ConfigStore(tmp)
         store.init_first_run()
         store.save_models_config({"models": {}})
 
         mode = stat.S_IMODE(os.stat(store.config_path).st_mode)
-        assert mode == 0o644, (
-            f"Expected config.yaml permissions 0o644, got {oct(mode)}"
+        assert mode == 0o600, (
+            f"Expected config.yaml permissions 0o600, got {oct(mode)}"
         )
 
 
@@ -67,6 +71,27 @@ def test_init_first_run_creates_directory_with_700():
         mode = stat.S_IMODE(os.stat(store.dir).st_mode)
         assert mode == 0o700, (
             f"Expected directory permissions 0o700, got {oct(mode)}"
+        )
+
+
+def test_set_api_key_locks_config_yaml_to_600():
+    """Writing the llmport api_key credential locks config.yaml to 0600.
+
+    config.yaml holds the api_key, so the credential-write path must not leave
+    it group/world-readable (0644) even if it was loosened beforehand.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ConfigStore(tmp)
+        store.init_first_run()
+        # Loosen the file first to prove set_api_key tightens it.
+        store.save_models_config({"models": {}})
+        os.chmod(store.config_path, 0o644)
+
+        store.set_api_key("sk-llmport-secret")
+
+        mode = stat.S_IMODE(os.stat(store.config_path).st_mode)
+        assert mode == 0o600, (
+            f"Expected config.yaml permissions 0o600, got {oct(mode)}"
         )
 
 

@@ -264,7 +264,7 @@ def _cmd_setup(dm: DaemonManager) -> None:
 
     print("llmport 设置")
     print(f"配置目录: {store.dir}")
-    print(f"  config.yaml     网关 + 模型映射 + llmport api_key (0644)")
+    print(f"  config.yaml     网关 + 模型映射 + llmport api_key (0600)")
     print(f"  providers.yaml  供应商 + API key (0600)")
     print()
     if generated:
@@ -612,7 +612,7 @@ def _config_init(dm: DaemonManager) -> None:
         return
     store.init_first_run(config_template=True)
     print("已生成配置模板:")
-    print(f"  {store.config_path}     (网关 + 模型映射 + llmport api_key, 0644)")
+    print(f"  {store.config_path}     (网关 + 模型映射 + llmport api_key, 0600)")
     print(f"  {store.providers_path}  (供应商 + 供应商 API key, 0600)")
     print("编辑这两个文件填入供应商和模型,然后运行 `llmport start`。")
     print("API key 直接写在 providers.yaml 的 provider 条目里(用 `llmport provider add` 更省事)。")
