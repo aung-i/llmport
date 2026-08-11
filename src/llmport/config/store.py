@@ -26,6 +26,7 @@ config -- see :meth:`_migrate_layout`.
 """
 
 import os
+import re
 import secrets
 from pathlib import Path
 
@@ -379,23 +380,64 @@ class ConfigStore:
         return key if isinstance(key, str) else ""
 
     def set_api_key(self, key: str) -> None:
-        """Write llmport's API key to config.yaml (preserving gateway/models)."""
-        try:
-            cfg = self.load_config()
-        except (FileNotFoundError, ValueError):
+        """Write llmport's API key to config.yaml (preserving comments/gateway/models).
+
+        Edits the ``api_key:`` line in place (or appends one) on the raw file
+        text rather than round-tripping the whole file through ``yaml.dump``.
+        A round-trip would strip every comment, wiping the commented template
+        (incl. the model-mapping examples) that ``setup`` just wrote -- so
+        ``set_api_key`` must be comment-preserving. Falls back to a full write
+        (defaults + key) only when the file is missing or unparseable, since
+        there is then nothing to preserve.
+        """
+        if not self.config_path.exists():
             cfg = {"version": 1, "gateway": dict(DEFAULT_GATEWAY), "models": {}}
-        cfg["api_key"] = key
-        self.save_config(cfg)
+            cfg["api_key"] = key
+            self.save_config(cfg)
+            return
+        try:
+            self.load_config()  # guard: don't blindly edit a corrupt file
+        except ValueError:
+            cfg = {"version": 1, "gateway": dict(DEFAULT_GATEWAY), "models": {}}
+            cfg["api_key"] = key
+            self.save_config(cfg)
+            return
+        # Serialize just the key/value so quoting matches save_config's output.
+        new_line = yaml.dump(
+            {"api_key": key}, default_flow_style=False,
+            allow_unicode=True, sort_keys=False,
+        ).rstrip("\n")
+        text = self.config_path.read_text(encoding="utf-8")
+        # ^api_key matches a top-level key only; the commented ``# api_key:``
+        # example starts with ``#`` and is left untouched.
+        m = re.search(r"^api_key\s*:.*$", text, flags=re.MULTILINE)
+        if m:
+            new_text = text[:m.start()] + new_line + text[m.end():]
+        else:
+            new_text = text.rstrip("\n") + "\n" + new_line + "\n"
+        _atomic_write_bytes(self.config_path, new_text.encode("utf-8"))
+        _chmod(self.config_path, 0o600)
 
     def clear_api_key(self) -> None:
-        """Remove llmport's API key from config.yaml (no-op if absent)."""
-        try:
-            cfg = self.load_config()
-        except (FileNotFoundError, ValueError):
+        """Remove llmport's API key from config.yaml (no-op if absent).
+
+        Comment-preserving: deletes only the top-level ``api_key:`` line,
+        leaving the rest of the file (incl. comments) intact.
+        """
+        if not self.config_path.exists():
             return
-        if "api_key" in cfg:
-            del cfg["api_key"]
-            self.save_config(cfg)
+        try:
+            self.load_config()
+        except ValueError:
+            return
+        text = self.config_path.read_text(encoding="utf-8")
+        # ``\n?`` eats the line's trailing newline so no blank line is left.
+        new_text, n = re.subn(
+            r"^api_key\s*:.*\n?", "", text, count=1, flags=re.MULTILINE)
+        if n == 0:
+            return
+        _atomic_write_bytes(self.config_path, new_text.encode("utf-8"))
+        _chmod(self.config_path, 0o600)
 
     # ------------------------------------------------------------------
     # models convenience (lives in config.yaml's ``models`` section)

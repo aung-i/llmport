@@ -136,6 +136,36 @@ class TestSetup:
         assert "provider add" in result.stdout
         assert "model add" in result.stdout
 
+    def test_setup_preserves_commented_template(self, tmp_path, monkeypatch):
+        """setup writes the api_key WITHOUT stripping the commented template.
+
+        Regression: set_api_key used to round-trip config.yaml through
+        yaml.dump, which drops every comment and wiped the model-mapping
+        examples the template exists to show. The key must be added while
+        leaving the commented examples (and the real gateway/models block)
+        intact.
+        """
+        from llmport.config.store import ConfigStore
+
+        invoke(["llmport", "setup"], tmp_path, monkeypatch)
+        store = ConfigStore(str(tmp_path / "llmport"))
+
+        ctext = (tmp_path / "llmport" / "config.yaml").read_text()
+        # The commented model-mapping examples survive (the whole point of
+        # the template).
+        assert "#   claude-sonnet: anthropic" in ctext
+        assert "#   gpt-4o:" in ctext
+        # The commented api_key *example* is not mistaken for the real key
+        # and left as a comment.
+        assert "# api_key: sk-llmport-xxxxx" in ctext
+        # The real generated key is present (uncommented) and loadable.
+        assert store.load_api_key().startswith("sk-llmport-")
+        assert store.load_api_key() in ctext
+        # And the real config still parses to the expected shape.
+        cfg = store.load_config()
+        assert cfg["gateway"]["port"] == 11434
+        assert cfg["models"] == {}
+
     def test_setup_does_not_prompt(self, tmp_path, monkeypatch):
         """setup must not read stdin -- it bootstraps and exits."""
         calls = []

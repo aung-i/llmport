@@ -122,6 +122,54 @@ class TestStoreApiKey:
         store.clear_api_key()  # must not raise
         assert store.load_api_key() == ""
 
+    def test_set_preserves_commented_template(self, tmp_path):
+        """set_api_key adds the key without stripping comments from the template.
+
+        Regression: a yaml.dump round-trip wiped the commented model-mapping
+        examples. The key is appended (no uncommented api_key existed) and the
+        commented ``# api_key:`` example stays a comment, not a duplicate key.
+        """
+        store = ConfigStore(str(tmp_path))
+        store.init_first_run(config_template=True)  # commented template
+        store.set_api_key("sk-llmport-secret")
+        text = store.config_path.read_text(encoding="utf-8")
+        assert "#   claude-sonnet: anthropic" in text  # examples survived
+        assert "# api_key: sk-llmport-xxxxx" in text   # example still commented
+        assert "api_key: sk-llmport-secret" in text    # real key present
+        # No duplicate top-level api_key line.
+        assert len([
+            ln for ln in text.splitlines()
+            if ln.startswith("api_key:")
+        ]) == 1
+
+    def test_set_replaces_existing_key_in_place(self, tmp_path):
+        """Setting a new key updates the existing line, no duplicate appended."""
+        store = ConfigStore(str(tmp_path))
+        store.init_first_run(config_template=True)
+        store.set_api_key("sk-llmport-old")
+        store.set_api_key("sk-llmport-new")
+        text = store.config_path.read_text(encoding="utf-8")
+        assert "sk-llmport-old" not in text
+        assert "api_key: sk-llmport-new" in text
+        assert store.load_api_key() == "sk-llmport-new"
+        # Still exactly one top-level api_key line.
+        assert len([
+            ln for ln in text.splitlines()
+            if ln.startswith("api_key:")
+        ]) == 1
+
+    def test_clear_preserves_comments(self, tmp_path):
+        """clear_api_key removes only the key line; comments survive."""
+        store = ConfigStore(str(tmp_path))
+        store.init_first_run(config_template=True)
+        store.set_api_key("sk-llmport-secret")
+        store.clear_api_key()
+        text = store.config_path.read_text(encoding="utf-8")
+        assert "#   claude-sonnet: anthropic" in text  # examples survived
+        assert "# api_key: sk-llmport-xxxxx" in text   # example still there
+        assert "sk-llmport-secret" not in text
+        assert store.load_api_key() == ""
+
     def test_load_tolerates_missing_config_file(self, tmp_path):
         store = ConfigStore(str(tmp_path))
         # No init, no config.yaml.
