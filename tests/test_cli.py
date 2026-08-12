@@ -623,9 +623,11 @@ class TestModelTestCommand:
         assert "✓" in result.stdout
         assert "✗" in result.stdout
         assert "有效" in result.stdout
-        # upstream mapping preserved per binding, in order
+        # each binding probed with its own upstream (concurrent: call order
+        # is not guaranteed, only the per-binding mapping is)
         ups = [c.args[1] for c in mock_tc.call_args_list]
-        assert ups == ["gpt-4o", "gpt4o-deploy"]
+        assert set(ups) == {"gpt-4o", "gpt4o-deploy"}
+        assert len(ups) == 2
 
     def test_no_key(self, tmp_path, monkeypatch):
         from llmport.config.store import ConfigStore

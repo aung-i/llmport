@@ -65,6 +65,8 @@ llmport model test claude-sonnet
 
 一张表,每条绑定一行,列:`模型 / 绑定 / 状态 / 延时 / 详情`(详情列成功时是回复,失败时是错误原因)。
 
+**逐行流式输出**:表头先打出,每条绑定一探完就立刻印出一行,不等全部探完。探测也是**并发**的(每条绑定是独立的上游调用),所以一条慢/超时的上游不会挡住其他更快结果的可见性 -- 跑全模型时不会再"卡半天什么都没有,直到最后才一起蹦出来"。
+
 单模型、多绑定:
 
 ```
@@ -117,7 +119,7 @@ deepseek-v4-flash  deepseek/deepseek-v4-flash  ✓     67ms   有效
 
 ## 源码
 
-- 入口与表格输出:`src/llmport/cli.py` 的 `_model_test` / `_print_test_table` / `_probe_all_models`
+- 入口与并发流式输出:`src/llmport/cli.py` 的 `_model_test` / `_probe_streaming` / `_probe_binding`
 - OpenAI 探测:`src/llmport/gateway/openai_handler.py` 的 `test_connection`
 - Anthropic 探测:`src/llmport/gateway/anthropic_handler.py` 的 `test_connection`
 - 绑定解析:`src/llmport/models/model.py` 的 `parse_models_config`

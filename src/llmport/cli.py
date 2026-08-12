@@ -486,27 +486,21 @@ def _model_test(dm: DaemonManager, name: str | None = None) -> None:
     providers = (pdata or {}).get("providers", [])
     by_name = {p.get("name"): p for p in providers}
 
-    probed = asyncio.run(_probe_all_models(targets, by_name))
-    rows = []
-    unusable = 0
-    for model, results in probed:
-        if not any(r["ok"] for r in results):
-            unusable += 1
-        for r in results:
-            binding = f"{r['provider']}/{r['upstream']}"
-            if r["ok"]:
-                reply = r.get("reply")
-                detail = _trunc(reply) if reply else "（无回复）"
-                rows.append((model.name, binding, "✓",
-                             f"{r['latency_ms']:.0f}ms", detail))
-            else:
-                err = r.get("error") or "连接失败（上游无响应或网络错误）"
-                rows.append((model.name, binding, "✗", "-", _trunc(err)))
-    _print_test_table(rows)
-    if len(probed) > 1:
-        usable = len(probed) - unusable
+    # Stream: print the header now, then one row per binding the moment its
+    # probe resolves -- no buffering until the end. Probes run concurrently
+    # (each binding is an independent upstream call), so a single slow/dead
+    # upstream no longer hides the results of faster ones behind it.
+    widths = _test_col_widths(targets)
+    _print_test_header(widths)
+    by_model = asyncio.run(_probe_streaming(targets, by_name, widths))
+
+    unusable = sum(
+        1 for results in by_model.values() if not any(r["ok"] for r in results)
+    )
+    if len(by_model) > 1:
+        usable = len(by_model) - unusable
         print()
-        print(f"汇总: {usable}/{len(probed)} 模型可用")
+        print(f"汇总: {usable}/{len(by_model)} 模型可用")
     if unusable > 0:
         raise SystemExit(1)
 
@@ -530,35 +524,81 @@ def _trunc(text: str, limit: int = 40) -> str:
     return one_line
 
 
-def _print_test_table(rows: list[tuple[str, str, str, str, str]]) -> None:
-    """Print probe results as a display-width-aligned table.
+def _test_col_widths(targets) -> list[int]:
+    """Pre-compute table column widths from config so the header can print
+    before any probe resolves and rows can stream aligned.
 
-    Each row is ``(model, binding, status, latency, detail)``. The last column
-    is left unpadded (no trailing spaces); the rest are padded so CJK content
-    stays aligned.
+    The model and binding strings are fully known up front; status is a fixed
+    ✓/✗; latency is formatted into a fixed-width field (unknown until probe
+    time, but bounded and short). The detail column is the last one and is
+    left unpadded, same as the old batch table.
     """
     headers = ("模型", "绑定", "状态", "延时", "详情")
-
-    def fmt(row):
-        left = "  ".join(_pad(row[i], widths[i]) for i in range(len(headers) - 1))
-        return left + "  " + row[-1]
-
-    cells = [headers, *rows]
-    widths = [max(_disp_width(c[i]) for c in cells) for i in range(len(headers))]
-    lines = [fmt(headers)] + [fmt(r) for r in rows]
-    print(lines[0])
-    print("-" * max(_disp_width(l) for l in lines))
-    for line in lines[1:]:
-        print(line)
+    model_w = _disp_width(headers[0])
+    for m in targets:
+        model_w = max(model_w, _disp_width(m.name))
+    bind_w = _disp_width(headers[1])
+    for m in targets:
+        for b in m.bindings:
+            bind_w = max(bind_w, _disp_width(f"{b.provider}/{b.upstream}"))
+    return [model_w, bind_w, _disp_width(headers[2]), 6]
 
 
-async def _probe_all_models(models, providers_by_name) -> list[tuple]:
-    """Probe each model's bindings in order; return ``(model, results)`` per model."""
-    return [(m, await _model_test_async(m, providers_by_name)) for m in models]
+def _fmt_test_row(row: tuple[str, ...], widths: list[int]) -> str:
+    """Format a 5-cell row: pad the first ``len(widths)`` columns to ``widths``
+    and leave the trailing detail column unpadded."""
+    left = "  ".join(_pad(row[i], widths[i]) for i in range(len(widths)))
+    return left + "  " + row[len(widths)]
 
 
-async def _model_test_async(model, providers_by_name) -> list[dict]:
-    """Probe each binding in order; return one result dict per binding.
+def _print_test_header(widths: list[int]) -> None:
+    headers = ("模型", "绑定", "状态", "延时", "详情")
+    line = _fmt_test_row(headers, widths)
+    print(line, flush=True)
+    print("-" * _disp_width(line), flush=True)
+
+
+def _print_test_row(model_name: str, result: dict, widths: list[int]) -> None:
+    binding = f"{result['provider']}/{result['upstream']}"
+    if result["ok"]:
+        reply = result.get("reply")
+        detail = _trunc(reply) if reply else "（无回复）"
+        row = (model_name, binding, "✓", f"{result['latency_ms']:.0f}ms", detail)
+    else:
+        err = result.get("error") or "连接失败（上游无响应或网络错误）"
+        row = (model_name, binding, "✗", "-", _trunc(err))
+    print(_fmt_test_row(row, widths), flush=True)
+
+
+async def _probe_streaming(targets, providers_by_name, widths) -> dict[str, list[dict]]:
+    """Probe every binding of every model concurrently and print each row as
+    it resolves. Returns per-model result lists (in target order) for the
+    summary / exit-code aggregation.
+
+    Concurrency matters: bindings are independent upstream calls, so a slow or
+    timing-out upstream should not delay the visibility of faster ones.
+    ``as_completed`` surfaces each result the moment it's ready.
+    """
+    import asyncio
+
+    async def one(model, binding):
+        return model.name, await _probe_binding(binding, providers_by_name)
+
+    tasks = [
+        asyncio.create_task(one(m, b))
+        for m in targets
+        for b in m.bindings
+    ]
+    by_model: dict[str, list[dict]] = {m.name: [] for m in targets}
+    for fut in asyncio.as_completed(tasks):
+        model_name, result = await fut
+        _print_test_row(model_name, result, widths)
+        by_model[model_name].append(result)
+    return by_model
+
+
+async def _probe_binding(binding, providers_by_name) -> dict:
+    """Probe one binding; return a result dict.
 
     A missing provider or key is reported as a failed binding rather than
     skipped, so every binding's status is visible.
@@ -566,36 +606,30 @@ async def _model_test_async(model, providers_by_name) -> list[dict]:
     from llmport.models.provider import ProviderConfig
     from llmport.gateway import openai_handler, anthropic_handler
 
-    results = []
-    for b in model.bindings:
-        entry = providers_by_name.get(b.provider)
-        if not entry:
-            results.append({"provider": b.provider, "upstream": b.upstream,
-                            "ok": False, "latency_ms": 0.0,
-                            "error": f"供应商 {b.provider} 未配置", "reply": None})
-            continue
-        api_key = entry.get("api_key", "")
-        if not api_key:
-            results.append({"provider": b.provider, "upstream": b.upstream,
-                            "ok": False, "latency_ms": 0.0,
-                            "error": "未设置 API key", "reply": None})
-            continue
-        provider = ProviderConfig(
-            name=b.provider,
-            protocol=entry.get("protocol", "openai"),
-            base_url=entry.get("base_url", ""),
-            api_key=api_key,
-        )
-        if provider.protocol == "anthropic":
-            ok, latency, error, reply = await anthropic_handler.test_connection(
-                provider, b.upstream)
-        else:
-            ok, latency, error, reply = await openai_handler.test_connection(
-                provider, b.upstream)
-        results.append({"provider": b.provider, "upstream": b.upstream,
-                        "ok": ok, "latency_ms": latency, "error": error,
-                        "reply": reply})
-    return results
+    entry = providers_by_name.get(binding.provider)
+    if not entry:
+        return {"provider": binding.provider, "upstream": binding.upstream,
+                "ok": False, "latency_ms": 0.0,
+                "error": f"供应商 {binding.provider} 未配置", "reply": None}
+    api_key = entry.get("api_key", "")
+    if not api_key:
+        return {"provider": binding.provider, "upstream": binding.upstream,
+                "ok": False, "latency_ms": 0.0,
+                "error": "未设置 API key", "reply": None}
+    provider = ProviderConfig(
+        name=binding.provider,
+        protocol=entry.get("protocol", "openai"),
+        base_url=entry.get("base_url", ""),
+        api_key=api_key,
+    )
+    if provider.protocol == "anthropic":
+        ok, latency, error, reply = await anthropic_handler.test_connection(
+            provider, binding.upstream)
+    else:
+        ok, latency, error, reply = await openai_handler.test_connection(
+            provider, binding.upstream)
+    return {"provider": binding.provider, "upstream": binding.upstream,
+            "ok": ok, "latency_ms": latency, "error": error, "reply": reply}
 
 
 # ============================================================================
