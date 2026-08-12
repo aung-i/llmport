@@ -18,8 +18,11 @@ through verbatim in the upstream format by the server, not translated here.
 
 import codecs
 import json
+import logging
 import time
 import uuid
+
+logger = logging.getLogger(__name__)
 
 # ── finish_reason (OpenAI) <-> stop_reason (Anthropic) ──────────────────────
 
@@ -41,6 +44,44 @@ _ANTHROPIC_IMAGE_MEDIA_TYPES = {
     "image/jpeg", "image/png", "image/gif", "image/webp",
 }
 
+# Top-level request fields each translator consumes (and thus must NOT be
+# blindly passed through -- they are either mapped, renamed, or handled
+# elsewhere). Everything else is passed through verbatim so API evolution
+# (new optional params the gateway doesn't know about) degrades visibly
+# instead of being silently dropped. ``model`` is excluded here because the
+# handler overwrites it with the resolved upstream model name.
+_OPENAI_REQUEST_KNOWN = frozenset({
+    "messages", "max_tokens", "temperature", "top_p", "stop", "stream",
+    "tools", "tool_choice", "model",
+})
+_ANTHROPIC_REQUEST_KNOWN = frozenset({
+    "system", "messages", "max_tokens", "temperature", "top_p",
+    "stop_sequences", "stream", "tools", "tool_choice", "model",
+})
+
+
+def _passthrough_unknown(body: dict, out: dict, known: frozenset,
+                         direction: str) -> None:
+    """Copy unmapped top-level fields from *body* into *out*, logging each.
+
+    Known fields are excluded so a field and its translated equivalent (e.g.
+    OpenAI ``stop`` -> Anthropic ``stop_sequences``) are never both sent.
+    Fields already present in *out* (e.g. ``system`` lifted from OpenAI
+    system messages) are not clobbered. The handler overwrites ``model``
+    regardless, but it is in *known* so the client's model name is not
+    forwarded either.
+    """
+    passed = []
+    for k, v in body.items():
+        if k in known or k in out:
+            continue
+        out[k] = v
+        passed.append(k)
+    if passed:
+        logger.warning(
+            "cross-format %s request: passed through unmapped fields: %s",
+            direction, passed)
+
 
 # ============================================================================
 # Request translation
@@ -54,7 +95,9 @@ def openai_to_anthropic_request(body: dict) -> dict:
     field (joined with blank lines). ``max_tokens`` is required by Anthropic,
     so it defaults to 1024 when the client omitted it. Tools, tool_choice,
     assistant ``tool_calls``, ``tool`` role results, and ``image_url`` parts
-    are mapped to their Anthropic equivalents.
+    are mapped to their Anthropic equivalents. Any other top-level field
+    (e.g. ``reasoning_effort``) is passed through verbatim so unmapped
+    params are not silently dropped.
     """
     out: dict = {}
     system_parts: list[str] = []
@@ -130,6 +173,7 @@ def openai_to_anthropic_request(body: dict) -> dict:
     tc = _openai_tool_choice_to_anthropic(body.get("tool_choice"))
     if tc is not None:
         out["tool_choice"] = tc
+    _passthrough_unknown(body, out, _OPENAI_REQUEST_KNOWN, "openai->anthropic")
     return out
 
 
@@ -140,7 +184,9 @@ def anthropic_to_openai_request(body: dict) -> dict:
     Content blocks are mapped to OpenAI parts: text blocks to text, image
     blocks to ``image_url`` (collapsed to a plain string when purely textual).
     Tool definitions, tool_choice, assistant ``tool_use`` blocks, and user
-    ``tool_result`` blocks are mapped to their OpenAI equivalents.
+    ``tool_result`` blocks are mapped to their OpenAI equivalents. Any other
+    top-level field (e.g. ``top_k``) is passed through verbatim so unmapped
+    params are not silently dropped.
     """
     out: dict = {}
     messages: list[dict] = []
@@ -193,6 +239,7 @@ def anthropic_to_openai_request(body: dict) -> dict:
     tc = _anthropic_tool_choice_to_openai(body.get("tool_choice"))
     if tc is not None:
         out["tool_choice"] = tc
+    _passthrough_unknown(body, out, _ANTHROPIC_REQUEST_KNOWN, "anthropic->openai")
     return out
 
 

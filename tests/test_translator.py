@@ -161,6 +161,101 @@ class TestAnthropicToOpenaiRequest:
         assert out["stop"] == ["A", "B"]
 
 
+class TestUnknownFieldPassthrough:
+    """Unmapped top-level request fields pass through verbatim (not silently
+    dropped), while known/renamed fields are not duplicated. See issue #4's
+    "silent drop" follow-up: API evolution must degrade visibly."""
+
+    def test_openai_unknown_fields_passed_through(self):
+        body = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "response_format": {"type": "json_object"},
+            "seed": 42,
+        }
+        out = translator.openai_to_anthropic_request(body)
+        assert out["reasoning_effort"] == "high"
+        assert out["response_format"] == {"type": "json_object"}
+        assert out["seed"] == 42
+
+    def test_openai_renamed_field_not_duplicated(self):
+        # `stop` is renamed to `stop_sequences`; the original must NOT also
+        # appear (would send both to the upstream).
+        out = translator.openai_to_anthropic_request({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["END"],
+        })
+        assert out["stop_sequences"] == ["END"]
+        assert "stop" not in out
+
+    def test_openai_model_not_passed_through(self):
+        # The handler injects the resolved upstream model name via
+        # {**body, "model": model_name}; the client's model name must not be
+        # forwarded by the translator.
+        out = translator.openai_to_anthropic_request({
+            "model": "gpt-5", "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert "model" not in out
+
+    def test_openai_system_field_not_clobbered(self):
+        # A top-level `system` (non-standard for OpenAI) must not overwrite
+        # the `system` lifted from system messages.
+        out = translator.openai_to_anthropic_request({
+            "messages": [
+                {"role": "system", "content": "from-message"},
+                {"role": "user", "content": "hi"},
+            ],
+            "system": "should-not-win",
+        })
+        assert out["system"] == "from-message"
+
+    def test_anthropic_unknown_fields_passed_through(self):
+        body = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "top_k": 40,
+            "metadata": {"user_id": "u1"},
+        }
+        out = translator.anthropic_to_openai_request(body)
+        assert out["top_k"] == 40
+        assert out["metadata"] == {"user_id": "u1"}
+
+    def test_anthropic_renamed_field_not_duplicated(self):
+        out = translator.anthropic_to_openai_request({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop_sequences": ["END"],
+        })
+        assert out["stop"] == "END"
+        assert "stop_sequences" not in out
+
+    def test_anthropic_model_not_passed_through(self):
+        out = translator.anthropic_to_openai_request({
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+        })
+        assert "model" not in out
+
+    def test_passthrough_logs_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="llmport.gateway.translator"):
+            translator.openai_to_anthropic_request({
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "high",
+            })
+        assert any("reasoning_effort" in r.message and "openai->anthropic" in r.message
+                   for r in caplog.records)
+
+    def test_no_warning_when_nothing_unknown(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="llmport.gateway.translator"):
+            translator.openai_to_anthropic_request({
+                "messages": [{"role": "user", "content": "hi"}],
+                "stop": ["END"],
+            })
+        assert not [r for r in caplog.records if "passed through" in r.message]
+
+
 # ============================================================================
 # Response translation (non-streaming)
 # ============================================================================
