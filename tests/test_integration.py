@@ -34,7 +34,7 @@ def test_full_flow():
         # Liveness probe (read-only, no stats).
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+        assert resp.json()["status"] == "ok"
 
         # Models endpoint via gateway
         resp = client.get("/openai/v1/models")

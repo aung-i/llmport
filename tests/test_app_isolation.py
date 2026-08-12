@@ -101,7 +101,7 @@ class TestSingleAppServesAllRoutes:
             assert resp.status_code == 200, (
                 f"GET /health should return 200, got {resp.status_code}"
             )
-            assert resp.json() == {"status": "ok"}
+            assert resp.json()["status"] == "ok"
         finally:
             tmp.cleanup()
 

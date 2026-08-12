@@ -45,7 +45,7 @@ class TestHealthEndpoint:
         with tempfile.TemporaryDirectory() as tmp:
             client = AuthedClient(_make_app(tmp))
             data = client.get("/health").json()
-            assert data == {"status": "ok"}
+            assert data["status"] == "ok"
 
 
 class TestBadBaseUrlMarkedDown:

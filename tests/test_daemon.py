@@ -550,3 +550,106 @@ class TestRunDaemonApiKeyGuard:
         with pytest.raises(SystemExit) as exc:
             daemon.run_daemon()
         assert exc.value.code == 1
+
+
+class TestWindowsPaths:
+    """Windows daemon lifecycle, exercised on any OS by mocking ``os.name``.
+
+    POSIX-only primitives (``os.kill(pid, 0)``, ``ps``, SIGKILL,
+    ``start_new_session``) are replaced on Windows with: /health-pid identity,
+    ``TerminateProcess`` via ``os.kill(pid, SIGTERM)``, /health exit-polling,
+    and ``CREATE_NEW_PROCESS_GROUP``. These tests pin that branching without
+    needing a real Windows run.
+    """
+
+    def _dm(self, tmp_path):
+        from llmport.daemon import DaemonManager
+        return DaemonManager(config_dir=str(tmp_path))
+
+    def test_pid_is_our_daemon_uses_health_pid_on_windows(self, tmp_path, monkeypatch):
+        """On Windows, identity = /health self-reported pid (no os.kill/ps)."""
+        dm = self._dm(tmp_path)
+        monkeypatch.setattr(os, "name", "nt")
+        with patch.object(dm, "_health_reports_pid", return_value=True):
+            assert dm._pid_is_our_daemon(9999) is True
+        with patch.object(dm, "_health_reports_pid", return_value=False):
+            assert dm._pid_is_our_daemon(9999) is False
+
+    def test_health_reports_pid_matches(self, tmp_path):
+        """_health_reports_pid is True only when /health returns our pid."""
+        dm = self._dm(tmp_path)
+        (tmp_path / "daemon.pid").write_text(
+            json.dumps({"pid": 9999, "port": 23456}))
+        with patch("llmport.daemon.httpx.Client") as MockClient:
+            resp = MockClient.return_value.__enter__.return_value.get.return_value
+            resp.status_code = 200
+            resp.json.return_value = {"status": "ok", "pid": 9999}
+            assert dm._health_reports_pid(9999) is True
+            # a different pid serving on the port -> not ours
+            resp.json.return_value = {"status": "ok", "pid": 1234}
+            assert dm._health_reports_pid(9999) is False
+
+    def test_health_reports_pid_false_on_non_200(self, tmp_path):
+        dm = self._dm(tmp_path)
+        with patch("llmport.daemon.httpx.Client") as MockClient:
+            resp = MockClient.return_value.__enter__.return_value.get.return_value
+            resp.status_code = 503
+            resp.json.return_value = {"status": "ok", "pid": 9999}
+            assert dm._health_reports_pid(9999) is False
+
+    def test_health_reports_pid_false_when_port_down(self, tmp_path):
+        dm = self._dm(tmp_path)
+        with patch("llmport.daemon.httpx.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value.get.side_effect = Exception
+            assert dm._health_reports_pid(9999) is False
+
+    def test_stop_on_windows_uses_sigterm_no_sigkill(self, tmp_path, monkeypatch):
+        """Windows stop: TerminateProcess via os.kill(pid, SIGTERM); no SIGKILL."""
+        (tmp_path / "daemon.pid").write_text(
+            json.dumps({"pid": 9999, "port": 23456}))
+        dm = self._dm(tmp_path)
+        monkeypatch.setattr(os, "name", "nt")
+        with patch.object(dm, "_pid_is_our_daemon", return_value=True), \
+             patch.object(os, "kill") as mock_kill, \
+             patch.object(dm, "_wait_for_exit", return_value=True):
+            dm.stop()
+        sent = [c.args[1] for c in mock_kill.call_args_list]
+        assert 15 in sent        # SIGTERM (signal.SIGTERM == 15 on Windows too)
+        assert 9 not in sent     # no SIGKILL escalation on Windows
+        assert not (tmp_path / "daemon.pid").exists()
+
+    def test_stop_on_windows_skips_when_not_ours(self, tmp_path, monkeypatch):
+        """A pid that fails identity (stale/recycled) is cleared, not signaled."""
+        (tmp_path / "daemon.pid").write_text(
+            json.dumps({"pid": 9999, "port": 23456}))
+        dm = self._dm(tmp_path)
+        monkeypatch.setattr(os, "name", "nt")
+        with patch.object(dm, "_pid_is_our_daemon", return_value=False), \
+             patch.object(os, "kill") as mock_kill:
+            dm.stop()
+        mock_kill.assert_not_called()
+        assert not (tmp_path / "daemon.pid").exists()
+
+    def test_start_on_windows_uses_creationflags(self, tmp_path, monkeypatch):
+        """Windows start detaches via CREATE_NEW_PROCESS_GROUP, not start_new_session."""
+        from llmport.daemon import DaemonManager
+        dm = DaemonManager(config_dir=str(tmp_path))
+        monkeypatch.setattr(os, "name", "nt")
+        with patch("llmport.daemon.subprocess.Popen") as MockPopen, \
+             patch("llmport.daemon.httpx.Client") as MockClient, \
+             patch("llmport.daemon.time.sleep"), \
+             patch.object(dm, "is_running", side_effect=[False, True]), \
+             patch.object(dm, "_port_answers_health", return_value=False):
+            MockClient.return_value.__enter__.return_value.get.return_value.status_code = 200
+            dm.start()
+        kwargs = MockPopen.call_args.kwargs
+        assert kwargs.get("creationflags") == 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        assert "start_new_session" not in kwargs
+
+    def test_wait_for_exit_on_windows_polls_health(self, tmp_path, monkeypatch):
+        """On Windows _wait_for_exit returns True once /health stops answering."""
+        dm = self._dm(tmp_path)
+        monkeypatch.setattr(os, "name", "nt")
+        with patch.object(dm, "_port_answers_health", side_effect=[True, False]), \
+             patch("llmport.daemon.time.sleep"):
+            assert dm._wait_for_exit(9999, 6.0) is True

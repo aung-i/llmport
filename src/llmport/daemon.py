@@ -117,12 +117,25 @@ class DaemonManager:
     def _pid_is_our_daemon(self, pid: int) -> bool:
         """True if *pid* is alive AND is our ``llmport --daemon`` process.
 
-        Verifies identity via the command line so a recycled pid owned by an
-        unrelated process is NOT mistaken for our daemon -- otherwise ``stop``
-        could signal (kill) the wrong process. If the command line can't be
-        read (``ps`` unavailable), falls back to trusting liveness alone: never
-        worse than the old ``os.kill``-only behavior.
+        Verifies identity so a recycled pid owned by an unrelated process is
+        NOT mistaken for our daemon -- otherwise ``stop`` could signal (kill)
+        the wrong process.
+
+        POSIX: liveness via ``os.kill(pid, 0)`` + command-line identity via
+        ``ps`` (portable across macOS/Linux). If the command line can't be
+        read (``ps`` unavailable), falls back to trusting liveness alone --
+        never worse than the old ``os.kill``-only behavior.
+
+        Windows: ``os.kill(pid, 0)`` and ``ps`` aren't available, so identity
+        comes from the daemon self-reporting its pid at ``GET /health`` -- if
+        the process serving on our gateway port reports this pid, it IS our
+        daemon (stronger than a cmdline match, and immune to pid recycling).
+        Trade-off: a hung daemon (alive but not answering /health) reads as
+        "not running" and can't be stopped via the CLI -- kill it with
+        ``taskkill /F /PID <pid>``.
         """
+        if os.name == "nt":
+            return self._health_reports_pid(pid)
         try:
             os.kill(pid, 0)
         except (ValueError, OSError):
@@ -131,6 +144,21 @@ class DaemonManager:
         if cmdline is None:
             return True  # alive, but can't verify -> trust (fallback)
         return "llmport" in cmdline and "--daemon" in cmdline
+
+    def _health_reports_pid(self, pid: int) -> bool:
+        """True if ``GET /health`` on the gateway port reports *pid*.
+
+        The daemon serves its own ``os.getpid()`` at ``/health``, so a matching
+        pid confirms the process on our port is our daemon -- cross-platform,
+        no ``ps``/``os.kill`` needed. Used for identity on Windows.
+        """
+        port = self._gateway_port()
+        try:
+            with httpx.Client(timeout=1.0) as client:
+                resp = client.get(f"http://127.0.0.1:{port}/health")
+                return resp.status_code == 200 and resp.json().get("pid") == pid
+        except Exception:
+            return False
 
     def _port_answers_health(self, port: int) -> bool:
         """True if something answers ``/health`` with 200 on localhost:port."""
@@ -231,12 +259,19 @@ class DaemonManager:
             cmd += ["--host", host]
         if port is not None:
             cmd += ["--port", str(port)]
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,  # detach from the caller
-        )
+        popen_kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            # Detach into a new process group so the daemon survives the CLI
+            # exiting and ignores Ctrl-C in the console. (start_new_session is
+            # POSIX-only and silently ignored on Windows.)
+            popen_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        else:
+            popen_kwargs["start_new_session"] = True  # detach from the caller
+        subprocess.Popen(cmd, **popen_kwargs)
         # Wait for the gateway to answer on its port.
         deadline = time.monotonic() + _START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -254,7 +289,8 @@ class DaemonManager:
         return False
 
     def stop(self) -> None:
-        """Stop the daemon via signals (SIGTERM, then SIGKILL).
+        """Stop the daemon (SIGTERM then SIGKILL on POSIX; TerminateProcess on
+        Windows).
 
         Control is exercised over the process, not over HTTP, so no control
         surface rides on the forwarding port. uvicorn handles SIGTERM with a
@@ -270,6 +306,19 @@ class DaemonManager:
         # Don't signal a pid that isn't ours (dead/stale, or recycled by an
         # unrelated process) -- just clear the stale pid file.
         if not self._pid_is_our_daemon(pid):
+            self._cleanup_pid()
+            return
+
+        if os.name == "nt":
+            # Windows: os.kill(pid, SIGTERM) maps to TerminateProcess -- an
+            # immediate, unconditional kill (no graceful/forceful distinction,
+            # so no SIGKILL escalation). ValueError/PermissionError -> gone.
+            import signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ValueError, OSError):
+                pass
+            self._wait_for_exit(pid, 6.0)
             self._cleanup_pid()
             return
 
@@ -304,10 +353,16 @@ class DaemonManager:
         """Poll until the process is gone. Returns True if it exited."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return True
+            if os.name == "nt":
+                # No os.kill(pid,0) liveness on Windows; poll /health instead
+                # -- once the port stops answering, the daemon is gone.
+                if not self._port_answers_health(self._gateway_port()):
+                    return True
+            else:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return True
             time.sleep(0.25)
         return False
 
